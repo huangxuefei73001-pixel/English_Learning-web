@@ -153,6 +153,54 @@ function getWordFallback(): VocabularyWord {
   return FALLBACK_WORD;
 }
 
+function normalizeWord(word: VocabularyWord | Partial<VocabularyWord> | undefined): VocabularyWord {
+  const fallback = getWordFallback();
+
+  return {
+    slug: word?.slug || fallback.slug,
+    title: word?.title || fallback.title,
+    phonetics: {
+      uk: word?.phonetics?.uk ?? fallback.phonetics.uk,
+      us: word?.phonetics?.us ?? fallback.phonetics.us,
+    },
+    partOfSpeech: word?.partOfSpeech || fallback.partOfSpeech,
+    chineseMeaning: word?.chineseMeaning || fallback.chineseMeaning,
+    englishDefinition: word?.englishDefinition || fallback.englishDefinition,
+    summary: word?.summary || fallback.summary,
+    usageLabels:
+      Array.isArray(word?.usageLabels) && word.usageLabels.length > 0
+        ? word.usageLabels
+        : fallback.usageLabels,
+    collocations:
+      Array.isArray(word?.collocations) && word.collocations.length > 0
+        ? word.collocations.filter(Boolean)
+        : fallback.collocations,
+    examples:
+      Array.isArray(word?.examples) && word.examples.length > 0
+        ? word.examples.filter(
+            (item): item is { label: UsageLabel; sentence: string } =>
+              Boolean(item?.label) && Boolean(item?.sentence),
+          )
+        : fallback.examples,
+    similarWords:
+      Array.isArray(word?.similarWords) && word.similarWords.length > 0
+        ? word.similarWords.filter(
+            (item): item is { slug: string; word: string; note: string } =>
+              Boolean(item?.slug) && Boolean(item?.word) && Boolean(item?.note),
+          )
+        : fallback.similarWords,
+    memoryAids: {
+      etymology: word?.memoryAids?.etymology ?? fallback.memoryAids.etymology,
+      roots: word?.memoryAids?.roots ?? fallback.memoryAids.roots,
+      mnemonic: word?.memoryAids?.mnemonic ?? fallback.memoryAids.mnemonic,
+    },
+    searchAliases:
+      Array.isArray(word?.searchAliases) && word.searchAliases.length > 0
+        ? word.searchAliases.filter(Boolean)
+        : fallback.searchAliases,
+  };
+}
+
 async function fetchWordFromApi(query: string) {
   const response = await fetch("/api/translate", {
     method: "POST",
@@ -222,7 +270,7 @@ export function HomePage() {
 
     try {
       const payload = await fetchWordFromApi(trimmed);
-      setSelectedWord(payload.word);
+      setSelectedWord(normalizeWord(payload.word));
       setModelName(payload.model);
       setSourceLabel(payload.source ?? "OpenRouter");
       setStatus(
@@ -301,6 +349,8 @@ export function HomePage() {
     setActiveTab("meaning");
     void loadWord(nextQuery, { updateUrl: true, recordHistory: true });
   }
+
+  const previewExample = selectedWord.examples.at(0)?.sentence ?? selectedWord.summary;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -536,7 +586,7 @@ export function HomePage() {
                     Learning glimpse
                   </p>
                   <p className="mt-3 text-sm leading-7 text-[#625b4f]">
-                    {selectedWord.examples[0]?.sentence ?? selectedWord.summary}
+                    {previewExample}
                   </p>
                   <p className="mt-3 text-sm text-[#6d6659]">
                     你会继续看到近义词区分、常见搭配和记忆方法，而不只是一个翻译结果。
