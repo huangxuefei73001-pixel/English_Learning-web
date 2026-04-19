@@ -5,7 +5,7 @@
 目标很简单：
 
 - 网站跑在腾讯云 CVM 上
-- 通过 Nginx 对外提供 `80/443`
+- 通过 Nginx 对外提供 `8083`（或后续再切到域名和 `80/443`）
 - OpenRouter Key 放在服务器环境里，不进前端代码
 - 如果服务器直连 OpenRouter 不通，可以切到代理或兼容接口
 
@@ -162,7 +162,7 @@ sudo systemctl restart English_Learning
 - `nginx/English_Learning.conf`
 - `nginx/English_Learning-test.conf`
 
-推荐正式环境直接使用 80 端口模板，然后把 `server_name` 改成你的域名。
+当前这套模板按独立站点默认跑在 `8083`，并显式绑定公网 IP，避免同机多站点时因为 `server_name _;` 或默认站点匹配不稳导致公网访问异常。
 
 安装到 Nginx：
 
@@ -173,7 +173,15 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-如果你只是临时用 IP 测试，也可以先把 `server_name` 保持为 `_`。
+如果你的公网 IP 不是 `81.70.165.205`，先把 `nginx/English_Learning.conf` 里的 `server_name` 改成你自己的公网 IP 或域名。
+
+当前模板关键配置是：
+
+- `listen 8083 default_server;`
+- `listen [::]:8083 default_server;`
+- `server_name 你的公网IP;`
+
+这三项不要省略。
 
 ## 8. 域名和 HTTPS
 
@@ -241,10 +249,23 @@ curl -I https://openrouter.ai
 - `npm run build` 成功
 - `sudo systemctl status English_Learning` 是 running
 - `curl -I http://127.0.0.1:3000` 返回 `200`
+- `curl -I http://127.0.0.1:8083` 返回 `200`
+- `curl -I http://你的公网IP:8083` 返回 `200`
 - 浏览器能打开首页
 - 搜索一个单词能返回结构化结果
 - 如果有 key，接口返回 `source: "openrouter"`
 - 如果没有 key，至少能回退到 `source: "mock"`
+
+如果：
+
+- `127.0.0.1:8083` 返回 `200`
+- 但 `公网IP:8083` 返回 `Empty reply from server`
+
+那优先检查：
+
+- `listen 8083 default_server`
+- `listen [::]:8083 default_server`
+- `server_name` 是否写成了你的公网 IP
 
 ## 11. 推荐的上线顺序
 
