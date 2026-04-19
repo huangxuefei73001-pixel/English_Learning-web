@@ -100,6 +100,31 @@ function safeRead<T>(key: string, fallback: T): T {
   }
 }
 
+function normalizeFavoriteEntry(
+  entry: FavoriteEntry | Partial<FavoriteEntry> | undefined,
+): FavoriteEntry | null {
+  if (!entry?.word) {
+    return null;
+  }
+
+  const word = normalizeWord(entry.word);
+  const now = new Date().toISOString();
+  const normalizedTag =
+    entry.tag && ["spoken", "neutral", "formal", "academic"].includes(entry.tag)
+      ? entry.tag
+      : word.usageLabels[0] ?? "neutral";
+
+  return {
+    word,
+    savedAt: entry.savedAt || now,
+    note: entry.note || word.memoryAids.mnemonic || word.summary,
+    tag: normalizedTag,
+    streak: typeof entry.streak === "number" && entry.streak > 0 ? entry.streak : 1,
+    reviewedAt: entry.reviewedAt || now,
+    dueAt: entry.dueAt || addDays(new Date(), REVIEW_INTERVALS[0]).toISOString(),
+  };
+}
+
 function usePersistentState<T>(key: string, fallback: T) {
   const [state, setState] = useState<T>(fallback);
   const [hydrated, setHydrated] = useState(false);
@@ -244,6 +269,23 @@ export function HomePage() {
     STORAGE_KEYS.favorites,
     INITIAL_FAVORITES,
   );
+  const normalizedFavorites = useMemo(
+    () =>
+      favorites
+        .map((item) => normalizeFavoriteEntry(item))
+        .filter((item): item is FavoriteEntry => Boolean(item)),
+    [favorites],
+  );
+
+  useEffect(() => {
+    const changed =
+      normalizedFavorites.length !== favorites.length ||
+      normalizedFavorites.some((item, index) => JSON.stringify(item) !== JSON.stringify(favorites[index]));
+
+    if (changed) {
+      setFavorites(normalizedFavorites);
+    }
+  }, [favorites, normalizedFavorites, setFavorites]);
 
   useEffect(() => {
     setQuery(routeQuery);
@@ -322,12 +364,12 @@ export function HomePage() {
   }, [routeQuery]);
 
   const favoriteMap = useMemo(
-    () => new Map(favorites.map((item) => [item.word.slug, item])),
-    [favorites],
+    () => new Map(normalizedFavorites.map((item) => [item.word.slug, item])),
+    [normalizedFavorites],
   );
 
-  const favoriteCount = favorites.length;
-  const dueCount = favorites.filter((item) => {
+  const favoriteCount = normalizedFavorites.length;
+  const dueCount = normalizedFavorites.filter((item) => {
     const due = new Date(item.dueAt);
     return !Number.isNaN(due.getTime()) && due.getTime() <= Date.now();
   }).length;
@@ -337,12 +379,12 @@ export function HomePage() {
 
   const reviewQueue = useMemo(
     () =>
-      [...favorites].sort((left, right) => {
+      [...normalizedFavorites].sort((left, right) => {
         const leftDue = new Date(left.dueAt).getTime();
         const rightDue = new Date(right.dueAt).getTime();
         return leftDue - rightDue;
       }),
-    [favorites],
+    [normalizedFavorites],
   );
 
   function syncSelection(nextQuery: string) {
