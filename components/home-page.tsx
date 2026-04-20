@@ -94,7 +94,22 @@ function safeRead<T>(key: string, fallback: T): T {
       return fallback;
     }
 
-    return JSON.parse(raw) as T;
+    const parsed = JSON.parse(raw) as T;
+
+    if (Array.isArray(fallback) && !Array.isArray(parsed)) {
+      return fallback;
+    }
+
+    if (
+      fallback !== null &&
+      typeof fallback === "object" &&
+      !Array.isArray(fallback) &&
+      (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    ) {
+      return fallback;
+    }
+
+    return parsed;
   } catch {
     return fallback;
   }
