@@ -47,26 +47,30 @@ export function recordSearch(entry: Omit<SearchHistoryEntry, "savedAt" | "count"
     return;
   }
 
-  const current = safeParse(window.localStorage.getItem(STORAGE_KEY));
-  const normalizedQuery = normalize(entry.query);
-  const existingIndex = current.findIndex((item) => normalize(item.query) === normalizedQuery);
-  const nextItem: SearchHistoryEntry = {
-    ...entry,
-    savedAt: new Date().toISOString(),
-    count: 1,
-  };
+  try {
+    const current = safeParse(window.localStorage.getItem(STORAGE_KEY));
+    const normalizedQuery = normalize(entry.query);
+    const existingIndex = current.findIndex((item) => normalize(item.query) === normalizedQuery);
+    const nextItem: SearchHistoryEntry = {
+      ...entry,
+      savedAt: new Date().toISOString(),
+      count: 1,
+    };
 
-  let next = current.filter((item) => normalize(item.query) !== normalizedQuery);
+    let next = current.filter((item) => normalize(item.query) !== normalizedQuery);
 
-  if (existingIndex >= 0) {
-    const existing = current[existingIndex];
-    nextItem.count = existing.count + 1;
+    if (existingIndex >= 0) {
+      const existing = current[existingIndex];
+      nextItem.count = existing.count + 1;
+    }
+
+    next = [nextItem, ...next].slice(0, MAX_ITEMS);
+
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    window.dispatchEvent(new Event(EVENT_NAME));
+  } catch {
+    // Ignore history persistence failures and keep the search flow working.
   }
-
-  next = [nextItem, ...next].slice(0, MAX_ITEMS);
-
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  window.dispatchEvent(new Event(EVENT_NAME));
 }
 
 export function clearSearchHistory() {
@@ -74,8 +78,12 @@ export function clearSearchHistory() {
     return;
   }
 
-  window.localStorage.removeItem(STORAGE_KEY);
-  window.dispatchEvent(new Event(EVENT_NAME));
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.dispatchEvent(new Event(EVENT_NAME));
+  } catch {
+    // Ignore storage cleanup failures.
+  }
 }
 
 export function useSearchHistory(limit = MAX_ITEMS) {

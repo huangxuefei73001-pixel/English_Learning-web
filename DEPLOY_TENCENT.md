@@ -7,6 +7,7 @@
 - 网站跑在腾讯云 CVM 上
 - 通过 Nginx 对外提供 `8083`（或后续再切到域名和 `80/443`）
 - OpenRouter Key 放在服务器环境里，不进前端代码
+- 账号、收藏、复习队列数据保存在服务器 `.data/word-islands.json`
 - 如果服务器直连 OpenRouter 不通，可以切到代理或兼容接口
 
 ## 1. 服务器准备
@@ -66,6 +67,9 @@ cat > .env.local <<'EOF'
 OPENROUTER_API_KEY=你的key
 OPENROUTER_MODEL=openrouter/auto
 OPENROUTER_API_URL=https://openrouter.ai/api/v1/chat/completions
+OPENROUTER_HTTP_REFERER=https://wordislands.cn
+OPENROUTER_TITLE=Word Islands
+WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
 EOF
 ```
 
@@ -74,6 +78,8 @@ EOF
 - `OPENROUTER_API_KEY` 是真正的密钥
 - `OPENROUTER_MODEL` 推荐写 `openrouter/auto`，先让站点稳定可用
 - `OPENROUTER_API_URL` 默认就是 OpenRouter 官方地址的 `chat/completions` 端点
+- `WORD_ISLANDS_ADMIN_EMAILS` 是允许导入旧收藏 JSON 的 admin 邮箱，多个邮箱用英文逗号隔开
+- 收藏和复习队列默认保存在项目根目录 `.data/word-islands.json`
 - 如果你想给 OpenRouter 带上站点信息，可以再加：
 
 ```bash
@@ -83,12 +89,19 @@ OPENROUTER_MODEL=openrouter/auto
 OPENROUTER_API_URL=https://openrouter.ai/api/v1/chat/completions
 OPENROUTER_HTTP_REFERER=https://your-site.example
 OPENROUTER_TITLE=English_Learning
+WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
 EOF
 ```
 
 如果你只提供 `OPENROUTER_BASE_URL` 或 `OPENAI_BASE_URL`，代码也会自动补成 `/chat/completions` 端点。
 
 如果你不想把 key 写到文件里，也可以直接在系统环境变量里导出，但 `.env.local` 最简单。
+
+如果你想固定账号数据文件位置，可以增加：
+
+```bash
+WORD_ISLANDS_DB_PATH=/home/ubuntu/English_Learning/.data/word-islands.json
+```
 
 ## 4. 安装依赖并构建
 
@@ -114,9 +127,8 @@ npm run start
 ```bash
 curl -I http://127.0.0.1:3000
 curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' -d '{"query":"salient"}'
+curl -s http://127.0.0.1:3000/api/auth/me
 ```
-
-如果 API 返回的是 `source: "openrouter"`，说明服务器已经成功读取到 key 并打通模型请求。
 
 如果 API 返回的是 `source: "openrouter"`，说明服务器已经成功读取到 key 并打通模型请求。
 
@@ -253,6 +265,10 @@ curl -I https://openrouter.ai
 - `curl -I http://你的公网IP:8083` 返回 `200`
 - 浏览器能打开首页
 - 搜索一个单词能返回结构化结果
+- 游客点击收藏会提示登录
+- 注册 / 登录后可以收藏单词
+- 登录后复习队列只显示当前账号收藏
+- admin 邮箱登录后可以看到旧收藏 JSON 导入入口
 - 如果有 key，接口返回 `source: "openrouter"`
 - 如果没有 key，至少能回退到 `source: "mock"`
 

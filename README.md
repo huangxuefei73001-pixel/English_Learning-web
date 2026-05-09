@@ -2,6 +2,8 @@
 
 一个移动优先的英语学习 Web App，基于 Next.js 14 + TypeScript + Tailwind CSS 搭建。现在首页已经接入真实模型接口，输入英文单词后会生成结构化的中英释义、近义词区别、常见搭配、例句和记忆方法。
 
+当前产品名是 Word Islands。游客可以直接查词；收藏单词、复习队列和旧收藏导入需要登录。每个登录账号只会看到自己的收藏记录。
+
 ## 已包含页面
 
 - 首页 Dashboard
@@ -26,6 +28,7 @@
 - Tailwind CSS
 - OpenRouter Chat Completions API
 - 默认模型：`openrouter/auto`
+- 服务端账号与收藏存储：`.data/word-islands.json`
 
 ## 运行
 
@@ -61,6 +64,30 @@ OPENROUTER_TITLE=English_Learning
 
 如果你在腾讯云服务器上部署，优先把 key 放到服务器的 `.env.local` 或进程环境变量里，不要写进前端代码，也不要提交到仓库。`OPENROUTER_API_URL` 只有在服务器需要改成别的 OpenRouter-compatible 入口时才改。
 
+## 账号和收藏配置
+
+收藏和复习队列保存在服务端 JSON 文件里，默认路径是：
+
+```bash
+.data/word-islands.json
+```
+
+`.data` 已加入 `.gitignore`，不要提交线上用户数据。
+
+如果需要指定创始人/admin 账号，用逗号分隔邮箱：
+
+```bash
+WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
+```
+
+只有 admin 邮箱登录后，页面才会显示“导入旧收藏 JSON”。普通用户没有导入入口，也不能调用导入接口。
+
+如果线上想把数据文件放到固定路径，可以配置：
+
+```bash
+WORD_ISLANDS_DB_PATH=/home/ubuntu/English_Learning/.data/word-islands.json
+```
+
 ## 腾讯云部署
 
 详细的线上部署步骤放在 `DEPLOY_TENCENT.md`。
@@ -81,6 +108,13 @@ OPENROUTER_TITLE=English_Learning
 - `/word/[slug]` - 词条详情
 - `/compare` - 易混词对比
 - `/library` - 我的资料库
+- `/api/auth/register` - 注册
+- `/api/auth/login` - 登录
+- `/api/auth/logout` - 退出登录
+- `/api/auth/me` - 当前登录用户
+- `/api/favorites` - 当前用户收藏列表与保存收藏
+- `/api/favorites/[slug]` - 删除当前用户收藏
+- `/api/favorites/import` - admin 导入旧收藏 JSON
 
 ## 说明
 

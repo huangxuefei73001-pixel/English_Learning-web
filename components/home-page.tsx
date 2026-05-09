@@ -24,9 +24,21 @@ type FavoriteEntry = {
   dueAt: string;
 };
 
+type AuthUser = {
+  id: string;
+  email: string;
+  createdAt: string;
+  isAdmin: boolean;
+};
+
+type AuthMode = "login" | "register";
+
 const STORAGE_KEYS = {
   favorites: "word-atlas.favorites",
+  history: "lexicon-garden.search-history",
+  version: "word-atlas.storage-version",
 };
+const STORAGE_VERSION = "2026-04-20-homepage-v1";
 
 const STUDY_TABS: Array<{ id: StudyTab; label: string; hint: string }> = [
   { id: "meaning", label: "释义", hint: "中文 + 英文释义" },
@@ -40,46 +52,7 @@ const REVIEW_INTERVALS = [1, 3, 7, 14, 30];
 const QUICK_START_WORDS = ["salient", "efficient", "contemplate"] as const;
 const PREVIEW_CUES = ["用法", "近义词", "搭配", "记忆方法"] as const;
 
-const SEED_FAVORITES: FavoriteEntry[] = [
-  {
-  word: getWordBySlug("salient")!,
-  savedAt: "2026-03-29T08:20:00.000Z",
-  note: "Use when one point rises above the rest and matters most.",
-  tag: "formal",
-  streak: 2,
-  reviewedAt: "2026-03-29T08:20:00.000Z",
-  dueAt: "2026-03-30T08:20:00.000Z",
-  },
-  {
-    word: getWordBySlug("contemplate")!,
-    savedAt: "2026-03-28T08:20:00.000Z",
-    note: "A slower, more reflective kind of thinking.",
-    tag: "academic",
-    streak: 1,
-    reviewedAt: "2026-03-28T08:20:00.000Z",
-    dueAt: "2026-03-30T08:20:00.000Z",
-  },
-  {
-    word: getWordBySlug("effective")!,
-    savedAt: "2026-03-27T08:20:00.000Z",
-    note: "Focus on the result, not the amount of effort.",
-    tag: "neutral",
-    streak: 3,
-    reviewedAt: "2026-03-27T08:20:00.000Z",
-    dueAt: "2026-03-30T08:20:00.000Z",
-  },
-  {
-    word: getWordBySlug("issue-bonds")!,
-    savedAt: "2026-03-26T08:20:00.000Z",
-    note: "A finance phrase for raising money through debt issuance.",
-    tag: "formal",
-    streak: 1,
-    reviewedAt: "2026-03-26T08:20:00.000Z",
-    dueAt: "2026-03-31T08:20:00.000Z",
-  },
-];
-
-const INITIAL_FAVORITES = SEED_FAVORITES.map((item) => ({ ...item }));
+const INITIAL_FAVORITES: FavoriteEntry[] = [];
 
 const FALLBACK_WORD = getWordBySlug("salient") ?? getWordBySlug("contemplate") ?? getWordBySlug("effective")!;
 
@@ -112,6 +85,20 @@ function safeRead<T>(key: string, fallback: T): T {
     return parsed;
   } catch {
     return fallback;
+  }
+}
+
+function resetLegacyStorage() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(STORAGE_KEYS.favorites);
+    window.localStorage.removeItem(STORAGE_KEYS.history);
+    window.localStorage.setItem(STORAGE_KEYS.version, STORAGE_VERSION);
+  } catch {
+    // Ignore storage reset failures and let the page keep rendering fallbacks.
   }
 }
 
@@ -154,7 +141,11 @@ function usePersistentState<T>(key: string, fallback: T) {
       return;
     }
 
-    window.localStorage.setItem(key, JSON.stringify(state));
+    try {
+      window.localStorage.setItem(key, JSON.stringify(state));
+    } catch {
+      // Ignore storage write failures so the homepage can still render.
+    }
   }, [hydrated, key, state]);
 
   return [state, setState] as const;
@@ -280,10 +271,15 @@ export function HomePage() {
   const [status, setStatus] = useState("Type a word to generate a fresh card.");
   const [error, setError] = useState<string | null>(null);
   const lastFetchedQueryRef = useRef("");
-  const [favorites, setFavorites] = usePersistentState<FavoriteEntry[]>(
-    STORAGE_KEYS.favorites,
-    INITIAL_FAVORITES,
-  );
+  const [favorites, setFavorites] = useState<FavoriteEntry[]>(INITIAL_FAVORITES);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("登录后，收藏和复习队列只会属于你自己。");
+  const [favoritesLoading, setFavoritesLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
   const normalizedFavorites = useMemo(
     () =>
       favorites
@@ -291,6 +287,22 @@ export function HomePage() {
         .filter((item): item is FavoriteEntry => Boolean(item)),
     [favorites],
   );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      const currentVersion = window.localStorage.getItem(STORAGE_KEYS.version);
+      if (currentVersion !== STORAGE_VERSION) {
+        resetLegacyStorage();
+        setFavorites(INITIAL_FAVORITES);
+      }
+    } catch {
+      setFavorites(INITIAL_FAVORITES);
+    }
+  }, [setFavorites]);
 
   useEffect(() => {
     const changed =
@@ -305,6 +317,158 @@ export function HomePage() {
   useEffect(() => {
     setQuery(routeQuery);
   }, [routeQuery]);
+
+  async function loadFavoritesForUser() {
+    setFavoritesLoading(true);
+
+    try {
+      const response = await fetch("/api/favorites", { cache: "no-store" });
+
+      if (!response.ok) {
+        setFavorites([]);
+        return;
+      }
+
+      const payload = (await response.json()) as { favorites?: FavoriteEntry[] };
+      setFavorites(Array.isArray(payload.favorites) ? payload.favorites : []);
+    } finally {
+      setFavoritesLoading(false);
+    }
+  }
+
+  async function loadCurrentUser() {
+    const response = await fetch("/api/auth/me", { cache: "no-store" });
+    const payload = (await response.json()) as { user?: AuthUser | null };
+    const user = payload.user ?? null;
+
+    setAuthUser(user);
+
+    if (user) {
+      setAuthEmail(user.email);
+      await loadFavoritesForUser();
+    } else {
+      setFavorites([]);
+    }
+  }
+
+  useEffect(() => {
+    void loadCurrentUser();
+  }, []);
+
+  function askForLogin(message = "登录后才能收藏单词和使用个人复习队列。") {
+    setAuthMode("login");
+    setAuthMessage(message);
+    document.getElementById("word-islands-account")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  async function submitAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAuthBusy(true);
+    setAuthMessage(authMode === "login" ? "正在登录..." : "正在创建账号...");
+
+    try {
+      const response = await fetch(`/api/auth/${authMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      const payload = (await response.json()) as { user?: AuthUser; error?: string };
+
+      if (!response.ok || !payload.user) {
+        throw new Error(payload.error || "账号操作失败，请稍后再试。");
+      }
+
+      setAuthUser(payload.user);
+      setAuthPassword("");
+      setAuthMessage("已登录。现在收藏和复习队列会保存到你的账号。");
+      await loadFavoritesForUser();
+    } catch (caughtError) {
+      setAuthMessage(caughtError instanceof Error ? caughtError.message : "账号操作失败，请稍后再试。");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setAuthUser(null);
+    setFavorites([]);
+    setAuthPassword("");
+    setAuthMessage("已退出登录。游客仍然可以查词，收藏需要重新登录。");
+  }
+
+  async function saveFavorite(nextFavorite: FavoriteEntry) {
+    const response = await fetch("/api/favorites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(nextFavorite),
+    });
+    const payload = (await response.json()) as { favorite?: FavoriteEntry; error?: string };
+
+    if (!response.ok || !payload.favorite) {
+      throw new Error(payload.error || "收藏保存失败，请重新登录后再试。");
+    }
+
+    setFavorites((current) => [
+      payload.favorite!,
+      ...current.filter((item) => item.word.slug !== payload.favorite!.word.slug),
+    ]);
+  }
+
+  async function deleteFavoriteFromServer(slug: string) {
+    const response = await fetch(`/api/favorites/${encodeURIComponent(slug)}`, {
+      method: "DELETE",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(payload?.error || "移出收藏失败，请稍后再试。");
+    }
+
+    setFavorites((current) => current.filter((item) => item.word.slug !== slug));
+  }
+
+  async function importLegacyFavorites(file: File) {
+    if (!authUser?.isAdmin) {
+      setAuthMessage("只有管理员账号可以导入旧收藏。");
+      return;
+    }
+
+    setImporting(true);
+    setAuthMessage("正在导入旧收藏...");
+
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as { favorites?: FavoriteEntry[] } | FavoriteEntry[];
+      const favoritesToImport = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed.favorites)
+          ? parsed.favorites
+          : [];
+
+      const response = await fetch("/api/favorites/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ favorites: favoritesToImport }),
+      });
+      const payload = (await response.json()) as {
+        favorites?: FavoriteEntry[];
+        importedCount?: number;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.error || "导入失败，请检查 JSON 文件。");
+      }
+
+      setFavorites(Array.isArray(payload.favorites) ? payload.favorites : []);
+      setAuthMessage(`已导入 ${payload.importedCount ?? 0} 个旧收藏。`);
+    } catch (caughtError) {
+      setAuthMessage(caughtError instanceof Error ? caughtError.message : "导入失败，请检查 JSON 文件。");
+    } finally {
+      setImporting(false);
+    }
+  }
 
   async function loadWord(nextQuery: string, options?: { updateUrl?: boolean; recordHistory?: boolean }) {
     const trimmed = nextQuery.trim();
@@ -420,73 +584,75 @@ export function HomePage() {
     syncSelection(trimmed);
   }
 
-  function toggleFavorite(word: VocabularyWord) {
-    setFavorites((current) => {
-      const existing = current.find((item) => item.word.slug === word.slug);
+  async function toggleFavorite(word: VocabularyWord) {
+    if (!authUser) {
+      askForLogin("登录或注册后，就能把这个单词保存到你的个人复习队列。");
+      return;
+    }
+
+    try {
+      const existing = favorites.find((item) => item.word.slug === word.slug);
 
       if (existing) {
-        return current.filter((item) => item.word.slug !== word.slug);
+        await deleteFavoriteFromServer(word.slug);
+        return;
       }
 
       const now = new Date();
-
-      return [
-        {
-          word,
-          savedAt: now.toISOString(),
-          note: word.memoryAids.mnemonic,
-          tag: word.usageLabels[0] ?? "neutral",
-          streak: 1,
-          reviewedAt: now.toISOString(),
-          dueAt: addDays(now, REVIEW_INTERVALS[0]).toISOString(),
-        },
-        ...current,
-      ];
-    });
-  }
-
-  function markReviewed(word: VocabularyWord) {
-    setFavorites((current) => {
-      const now = new Date();
-      let updated = false;
-
-      const next = current.map((item) => {
-        if (item.word.slug !== word.slug) {
-          return item;
-        }
-
-        updated = true;
-        const streak = Math.min(item.streak + 1, REVIEW_INTERVALS.length);
-        const interval = REVIEW_INTERVALS[Math.min(streak - 1, REVIEW_INTERVALS.length - 1)];
-
-        return {
-          ...item,
-          streak,
-          reviewedAt: now.toISOString(),
-          dueAt: addDays(now, interval).toISOString(),
-          note: item.note || word.memoryAids.mnemonic,
-          tag: item.tag,
-        };
+      await saveFavorite({
+        word,
+        savedAt: now.toISOString(),
+        note: word.memoryAids.mnemonic,
+        tag: word.usageLabels[0] ?? "neutral",
+        streak: 1,
+        reviewedAt: now.toISOString(),
+        dueAt: addDays(now, REVIEW_INTERVALS[0]).toISOString(),
       });
-
-      if (!updated) {
-        next.unshift({
-          word,
-          savedAt: now.toISOString(),
-          note: word.memoryAids.mnemonic,
-          tag: word.usageLabels[0] ?? "neutral",
-          streak: 1,
-          reviewedAt: now.toISOString(),
-          dueAt: addDays(now, REVIEW_INTERVALS[0]).toISOString(),
-        });
-      }
-
-      return next;
-    });
+      setAuthMessage("已加入你的个人复习队列。");
+    } catch (caughtError) {
+      setAuthMessage(caughtError instanceof Error ? caughtError.message : "收藏保存失败，请稍后再试。");
+    }
   }
 
-  function removeFromQueue(word: VocabularyWord) {
-    setFavorites((current) => current.filter((item) => item.word.slug !== word.slug));
+  async function markReviewed(word: VocabularyWord) {
+    if (!authUser) {
+      askForLogin("登录后才能记录你的个人复习进度。");
+      return;
+    }
+
+    const now = new Date();
+    const existing = favorites.find((item) => item.word.slug === word.slug);
+    const streak = existing ? Math.min(existing.streak + 1, REVIEW_INTERVALS.length) : 1;
+    const interval = REVIEW_INTERVALS[Math.min(streak - 1, REVIEW_INTERVALS.length - 1)];
+
+    try {
+      await saveFavorite({
+        word,
+        savedAt: existing?.savedAt || now.toISOString(),
+        note: existing?.note || word.memoryAids.mnemonic,
+        tag: existing?.tag || word.usageLabels[0] || "neutral",
+        streak,
+        reviewedAt: now.toISOString(),
+        dueAt: addDays(now, interval).toISOString(),
+      });
+      setAuthMessage("复习进度已保存。");
+    } catch (caughtError) {
+      setAuthMessage(caughtError instanceof Error ? caughtError.message : "复习进度保存失败。");
+    }
+  }
+
+  async function removeFromQueue(word: VocabularyWord) {
+    if (!authUser) {
+      askForLogin("登录后才能管理你的个人复习队列。");
+      return;
+    }
+
+    try {
+      await deleteFavoriteFromServer(word.slug);
+      setAuthMessage("已从你的复习队列移出。");
+    } catch (caughtError) {
+      setAuthMessage(caughtError instanceof Error ? caughtError.message : "移出失败，请稍后再试。");
+    }
   }
 
   return (
@@ -604,14 +770,6 @@ export function HomePage() {
                     {selectedWord.summary}
                   </p>
                 </div>
-
-                <button
-                  type="button"
-                  onClick={() => syncSelection(selectedWord.title)}
-                  className="inline-flex min-h-11 items-center justify-center rounded-full border border-[#d9d1bf] bg-white/78 px-4 text-sm font-semibold text-[#191813] transition hover:border-[#9c8c63] hover:bg-white"
-                >
-                  打开这张学习卡
-                </button>
               </div>
 
               <div className="mt-4 flex flex-wrap gap-2">
@@ -656,6 +814,125 @@ export function HomePage() {
       </section>
 
       <section className="mx-auto mt-6 w-full max-w-6xl space-y-6">
+        <section
+          id="word-islands-account"
+          className="rounded-[32px] border border-[#d8d0be] bg-white/72 p-5 shadow-[0_18px_60px_rgba(63,57,36,0.05)] sm:p-6"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.32em] text-[#7a705f]">
+                Account
+              </p>
+              <h3 className="mt-2 text-2xl font-semibold tracking-tight text-[#191813]">
+                {authUser ? "个人学习记录" : "登录后保存收藏"}
+              </h3>
+              <p className="mt-3 max-w-2xl text-sm leading-7 text-[#625b4f]">
+                {authUser
+                  ? `当前账号：${authUser.email}。你的收藏和复习队列会保存到这个账号。`
+                  : "游客可以直接查词；收藏单词、复习队列和旧记录导入需要登录。"}
+              </p>
+            </div>
+
+            {authUser ? (
+              <button
+                type="button"
+                onClick={() => void logout()}
+                className="rounded-full border border-[#d9d1bf] bg-white/85 px-4 py-2 text-sm font-semibold text-[#191813] transition hover:border-[#9c8c63] hover:bg-white"
+              >
+                退出登录
+              </button>
+            ) : null}
+          </div>
+
+          {authUser ? (
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <span className="rounded-full border border-[#d9d1bf] bg-[#f9f4ea] px-3 py-2 text-xs font-semibold text-[#625b4f]">
+                已登录
+              </span>
+              {authUser.isAdmin ? (
+                <label className="cursor-pointer rounded-full border border-[#191813] bg-[#191813] px-4 py-2 text-xs font-semibold text-[#f7f2e8] transition hover:bg-[#303024]">
+                  {importing ? "正在导入..." : "导入旧收藏 JSON"}
+                  <input
+                    type="file"
+                    accept="application/json"
+                    className="sr-only"
+                    disabled={importing}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) {
+                        void importLegacyFavorites(file);
+                      }
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+              ) : null}
+            </div>
+          ) : (
+            <form onSubmit={submitAuth} className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+              <input
+                value={authEmail}
+                onChange={(event) => setAuthEmail(event.target.value)}
+                placeholder="邮箱"
+                type="email"
+                className="min-h-12 rounded-full border border-[#d9d1bf] bg-white/86 px-4 text-sm text-[#191813] outline-none placeholder:text-[#8b8477]"
+                autoComplete="email"
+              />
+              <input
+                value={authPassword}
+                onChange={(event) => setAuthPassword(event.target.value)}
+                placeholder="密码，至少 8 位"
+                type="password"
+                className="min-h-12 rounded-full border border-[#d9d1bf] bg-white/86 px-4 text-sm text-[#191813] outline-none placeholder:text-[#8b8477]"
+                autoComplete={authMode === "login" ? "current-password" : "new-password"}
+              />
+              <button
+                type="submit"
+                disabled={authBusy}
+                className="min-h-12 rounded-full bg-[#191813] px-5 text-sm font-semibold text-[#f7f2e8] transition hover:bg-[#303024] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {authBusy ? "处理中" : authMode === "login" ? "登录" : "注册"}
+              </button>
+              <div className="flex flex-wrap items-center gap-2 md:col-span-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthMessage("登录后，收藏和复习队列只会属于你自己。");
+                  }}
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-xs font-semibold",
+                    authMode === "login"
+                      ? "border-[#191813] bg-[#191813] text-[#f7f2e8]"
+                      : "border-[#d9d1bf] bg-white/80 text-[#625b4f]",
+                  )}
+                >
+                  已有账号
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode("register");
+                    setAuthMessage("注册后即可保存个人收藏和复习队列。");
+                  }}
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-xs font-semibold",
+                    authMode === "register"
+                      ? "border-[#191813] bg-[#191813] text-[#f7f2e8]"
+                      : "border-[#d9d1bf] bg-white/80 text-[#625b4f]",
+                  )}
+                >
+                  创建账号
+                </button>
+              </div>
+            </form>
+          )}
+
+          <p className="mt-3 text-sm leading-7 text-[#8b5d22]" aria-live="polite">
+            {authMessage}
+          </p>
+        </section>
+
         <section className="rounded-[36px] border border-[#d8d0be] bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(247,240,225,0.82))] p-5 shadow-[0_20px_70px_rgba(63,57,36,0.07)] sm:p-6">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="max-w-3xl">
@@ -681,7 +958,7 @@ export function HomePage() {
                       : "border-[#d9d1bf] bg-white/75 text-[#191813] hover:border-[#9c8c63] hover:bg-white",
                   )}
                 >
-                  {isFavorited ? "取消收藏" : "收藏单词"}
+                  {!authUser ? "登录后收藏" : isFavorited ? "取消收藏" : "收藏单词"}
                 </button>
                 <Link
                   href={`/word/${selectedWord.slug}`}
@@ -877,12 +1154,14 @@ export function HomePage() {
                 进入复习队列
               </h3>
               <p className="mt-3 text-sm leading-7 text-[#625b4f]">
-                收藏词条会集中进入这里，按复习到期时间排序，方便你继续完成下一轮学习。
+                {authUser
+                  ? "收藏词条会集中进入这里，按复习到期时间排序，方便你继续完成下一轮学习。"
+                  : "登录后，这里会显示你自己的收藏和复习队列；游客查词不会看到别人的记录。"}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full border border-[#d9d1bf] bg-white/80 px-3 py-2 text-xs font-semibold text-[#625b4f]">
-                {favoriteCount} words
+                {favoritesLoading ? "同步中" : `${favoriteCount} words`}
               </span>
               <span className="rounded-full border border-[#d9d1bf] bg-white/80 px-3 py-2 text-xs font-semibold text-[#625b4f]">
                 {dueCount} 项待复习
@@ -951,7 +1230,9 @@ export function HomePage() {
 
             {!reviewQueue.length ? (
               <div className="rounded-[24px] border border-dashed border-[#d9d1bf] bg-white/60 p-4 text-sm leading-7 text-[#625b4f]">
-                收藏单词后，这里会自动成为你的复习清单。
+                {authUser
+                  ? "收藏单词后，这里会自动成为你的复习清单。"
+                  : "请先登录或注册，再保存自己的收藏和复习记录。"}
               </div>
             ) : null}
           </div>

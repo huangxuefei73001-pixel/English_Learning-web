@@ -44,6 +44,8 @@ const APP_TITLE =
   process.env.OPENROUTER_TITLE?.trim() ??
   process.env.OPENROUTER_APP_TITLE?.trim() ??
   "English_Learning";
+const CACHE_TTL_MS = 10 * 60 * 1000;
+const wordCache = new Map<string, { expiresAt: number; payload: { model: string; source: string; word: unknown } }>();
 
 const WORD_SCHEMA = {
   type: "object",
@@ -336,6 +338,27 @@ function findCardIssues(card: VocabularyCard) {
   }
 
   return issues;
+}
+
+function findCriticalCardIssues(card: VocabularyCard) {
+  const issues: string[] = [];
+
+  if (!nonEmptyString(card.chineseMeaning)) issues.push("chineseMeaning is empty");
+  if (!nonEmptyString(card.englishDefinition)) issues.push("englishDefinition is empty");
+  if (!nonEmptyString(card.summary)) issues.push("summary is empty");
+  if (!Array.isArray(card.examples) || card.examples.length < 2) issues.push("examples has too few items");
+  if (
+    Array.isArray(card.examples) &&
+    card.examples.some((item) => (typeof item === "string" ? !nonEmptyString(item) : !nonEmptyString(item?.sentence)))
+  ) {
+    issues.push("examples contains empty sentences");
+  }
+
+  return issues;
+}
+
+function normalizeQueryKey(query: string) {
+  return query.trim().toLowerCase();
 }
 
 function slugify(value: string) {
@@ -750,6 +773,12 @@ export async function POST(request: Request) {
   }
 
   try {
+    const cacheKey = normalizeQueryKey(query);
+    const cached = wordCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return NextResponse.json(cached.payload);
+    }
+
     const primaryModel = MODEL;
     const fallbackModel = "openrouter/auto";
     const attemptModels = primaryModel === fallbackModel ? [primaryModel] : [primaryModel, fallbackModel];
@@ -773,13 +802,16 @@ export async function POST(request: Request) {
           }
         }
         parsedIssues = findCardIssues(rawWord as VocabularyCard);
+        const criticalIssues = findCriticalCardIssues(rawWord as VocabularyCard);
         if (parsedIssues.length > 0) {
-          console.warn("OpenRouter returned incomplete card", { query, model, parsedIssues, rawWord });
+          console.warn("OpenRouter returned partial card", { query, model, parsedIssues, rawWord });
+        }
+        if (criticalIssues.length > 0) {
           const repairedWord = sanitizeCard(
-            await callOpenRouter(query, model, rawWord, parsedIssues.slice(0, 8)) as VocabularyCard,
+            await callOpenRouter(query, model, rawWord, criticalIssues.slice(0, 6)) as VocabularyCard,
             query,
           );
-          const repairIssues = findCardIssues(repairedWord as VocabularyCard);
+          const repairIssues = findCriticalCardIssues(repairedWord as VocabularyCard);
           if (repairIssues.length > 0) {
             console.error("OpenRouter repair still incomplete", {
               query,
@@ -835,11 +867,18 @@ export async function POST(request: Request) {
       searchAliases: structuredWord.searchAliases ?? [query],
     };
 
-    return NextResponse.json({
+    const responsePayload = {
       model: usedModel,
       source: "openrouter",
       word,
+    };
+
+    wordCache.set(cacheKey, {
+      expiresAt: Date.now() + CACHE_TTL_MS,
+      payload: responsePayload,
     });
+
+    return NextResponse.json(responsePayload);
   } catch (error) {
     const message = describeRequestError(error);
     console.error("OpenRouter request failed", { query, error: message });
