@@ -7,3 +7,4 @@ node_modules
 *.tar.gz
 tsconfig.tsbuildinfo
 .data
+.word-islands-cache

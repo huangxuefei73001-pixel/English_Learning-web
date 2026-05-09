@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { resolveWordForQuery, type VocabularyWord } from "@/data/mock";
 
 const MODEL =
   process.env.OPENROUTER_MODEL ??
@@ -44,8 +47,12 @@ const APP_TITLE =
   process.env.OPENROUTER_TITLE?.trim() ??
   process.env.OPENROUTER_APP_TITLE?.trim() ??
   "English_Learning";
-const CACHE_TTL_MS = 10 * 60 * 1000;
-const wordCache = new Map<string, { expiresAt: number; payload: { model: string; source: string; word: unknown } }>();
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+type WordCachePayload = { model: string; source: string; stage?: string; word: unknown };
+type WordCacheEntry = { expiresAt: number; payload: WordCachePayload };
+const wordCache = new Map<string, WordCacheEntry>();
+const CACHE_FILE = path.join(process.cwd(), ".word-islands-cache", "study-cards.json");
+let cacheFileLoaded = false;
 
 const WORD_SCHEMA = {
   type: "object",
@@ -128,6 +135,15 @@ const WORD_SCHEMA = {
         mnemonic: { type: "string" },
       },
     },
+    studyNotes: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        usageScene: { type: "string" },
+        commonMistake: { type: "string" },
+        writingUsage: { type: "string" },
+      },
+    },
     searchAliases: {
       type: "array",
       items: { type: "string" },
@@ -148,6 +164,7 @@ const SYSTEM_PROMPT = [
   "Examples should sound real and not copy the collocations verbatim.",
   "Similar words should focus on common confusions and the key distinction in Chinese.",
   "Memory aids should be short, practical, and easy to remember.",
+  "Study notes should explain usage scene, common mistake, and writing or presentation usage.",
   "The slug must be lowercase kebab-case.",
 ].join(" ");
 
@@ -165,6 +182,7 @@ function buildUserPrompt(query: string) {
     "Collocations must contain at least 2 useful items.",
     "Examples must contain at least 2 natural sentences with non-empty sentence text.",
     "similarWords, memoryAids, and searchAliases are optional, but if included they should contain useful non-empty values.",
+    "Include studyNotes with useful usageScene, commonMistake, and writingUsage when possible.",
     "If you are uncertain, make a reasonable best-effort choice instead of leaving core fields blank.",
   ].join(" ");
 }
@@ -180,6 +198,7 @@ function buildRepairPrompt(query: string, previousJson: unknown, issues: string[
     "Make sure chineseMeaning, englishDefinition, summary, collocations, and examples are fully populated.",
     "At least 2 collocations and at least 2 non-empty example sentences are required.",
     "similarWords, memoryAids, and searchAliases may be empty or omitted if you are unsure.",
+    "studyNotes should include usageScene, commonMistake, and writingUsage when possible.",
     `Previous JSON: ${JSON.stringify(previousJson)}`,
   ].join(" ");
 }
@@ -216,6 +235,7 @@ type VocabularyCard = {
   examples?: Array<{ label?: "spoken" | "neutral" | "formal" | "academic"; sentence?: string; translation?: string } | string>;
   similarWords?: Array<{ slug?: string; word?: string; note?: string; difference?: string } | string>;
   memoryAids?: { etymology?: string; roots?: string; mnemonic?: string; notes?: string[] | string } | string[] | string;
+  studyNotes?: { usageScene?: string; commonMistake?: string; writingUsage?: string };
   searchAliases?: string[];
 };
 
@@ -318,8 +338,57 @@ function sanitizeCard(card: VocabularyCard, query: string): VocabularyCard {
     examples,
     similarWords,
     memoryAids,
+    studyNotes: card.studyNotes
+      ? {
+          usageScene: trimString(card.studyNotes.usageScene),
+          commonMistake: trimString(card.studyNotes.commonMistake),
+          writingUsage: trimString(card.studyNotes.writingUsage),
+        }
+      : undefined,
     searchAliases,
   };
+}
+
+function buildBasicWord(query: string) {
+  const localWord = resolveWordForQuery(query);
+  if (localWord) {
+    return {
+      ...localWord,
+      similarWords: [],
+      memoryAids: {
+        etymology: "",
+        roots: "",
+        mnemonic: "",
+      },
+      studyNotes: undefined,
+      examples: [],
+    };
+  }
+
+  const title = query.trim();
+  return {
+    slug: slugify(title) || "word",
+    title,
+    phonetics: {
+      uk: "",
+      us: "",
+    },
+    partOfSpeech: "word",
+    chineseMeaning: "基础释义正在准备，Study Card 会继续补全。",
+    englishDefinition: "A vocabulary card is being generated for this word.",
+    summary: "Study Card 正在生成中，稍后会补充用法、近义词、例句和记忆方法。",
+    usageLabels: ["neutral"],
+    collocations: [title, `${title} usage`].filter(Boolean),
+    examples: [],
+    similarWords: [],
+    memoryAids: {
+      etymology: "",
+      roots: "",
+      mnemonic: "",
+    },
+    studyNotes: undefined,
+    searchAliases: [title],
+  } satisfies VocabularyWord;
 }
 
 function findCardIssues(card: VocabularyCard) {
@@ -359,6 +428,53 @@ function findCriticalCardIssues(card: VocabularyCard) {
 
 function normalizeQueryKey(query: string) {
   return query.trim().toLowerCase();
+}
+
+async function loadWordCacheFromFile() {
+  if (cacheFileLoaded) {
+    return;
+  }
+
+  cacheFileLoaded = true;
+
+  try {
+    const raw = await readFile(CACHE_FILE, "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, WordCacheEntry>;
+    const now = Date.now();
+
+    Object.entries(parsed).forEach(([key, entry]) => {
+      if (entry?.expiresAt > now && entry.payload?.word) {
+        wordCache.set(key, entry);
+      }
+    });
+  } catch {
+    // The cache file is optional. Missing or invalid cache should never block lookup.
+  }
+}
+
+async function getCachedStudyCard(cacheKey: string) {
+  const memoryHit = wordCache.get(cacheKey);
+  if (memoryHit && memoryHit.expiresAt > Date.now()) {
+    return memoryHit.payload;
+  }
+
+  await loadWordCacheFromFile();
+  const fileHit = wordCache.get(cacheKey);
+  return fileHit && fileHit.expiresAt > Date.now() ? fileHit.payload : null;
+}
+
+async function setCachedStudyCard(cacheKey: string, payload: WordCachePayload) {
+  wordCache.set(cacheKey, {
+    expiresAt: Date.now() + CACHE_TTL_MS,
+    payload,
+  });
+
+  try {
+    await mkdir(path.dirname(CACHE_FILE), { recursive: true });
+    await writeFile(CACHE_FILE, JSON.stringify(Object.fromEntries(wordCache), null, 2));
+  } catch (error) {
+    console.warn("Failed to write Study Card cache", { error: describeRequestError(error) });
+  }
 }
 
 function slugify(value: string) {
@@ -753,8 +869,9 @@ async function repairMalformedJson(query: string, model: string, malformed: stri
 }
 
 export async function POST(request: Request) {
-  const payload = (await request.json().catch(() => null)) as { query?: string } | null;
+  const payload = (await request.json().catch(() => null)) as { query?: string; mode?: "basic" | "study" } | null;
   const query = payload?.query?.trim() ?? "";
+  const mode = payload?.mode ?? "study";
 
   if (!query) {
     return NextResponse.json(
@@ -763,20 +880,33 @@ export async function POST(request: Request) {
     );
   }
 
-  if (!API_KEY) {
-    return NextResponse.json(
-      {
-        error: "Missing OPENROUTER_API_KEY. Configure the server environment before searching.",
-      },
-      { status: 500 },
-    );
-  }
-
   try {
     const cacheKey = normalizeQueryKey(query);
-    const cached = wordCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      return NextResponse.json(cached.payload);
+    const cached = await getCachedStudyCard(cacheKey);
+    if (cached) {
+      return NextResponse.json({
+        ...cached,
+        source: `${cached.source}-cache`,
+        stage: "study",
+      });
+    }
+
+    if (mode === "basic") {
+      return NextResponse.json({
+        model: "basic-dictionary",
+        source: "basic",
+        stage: "basic",
+        word: buildBasicWord(query),
+      });
+    }
+
+    if (!API_KEY) {
+      return NextResponse.json(
+        {
+          error: "Missing OPENROUTER_API_KEY. Configure the server environment before searching.",
+        },
+        { status: 500 },
+      );
     }
 
     const primaryModel = MODEL;
@@ -864,19 +994,18 @@ export async function POST(request: Request) {
         roots: "",
         mnemonic: "",
       },
+      studyNotes: structuredWord.studyNotes,
       searchAliases: structuredWord.searchAliases ?? [query],
     };
 
     const responsePayload = {
       model: usedModel,
       source: "openrouter",
+      stage: "study",
       word,
     };
 
-    wordCache.set(cacheKey, {
-      expiresAt: Date.now() + CACHE_TTL_MS,
-      payload: responsePayload,
-    });
+    await setCachedStudyCard(cacheKey, responsePayload);
 
     return NextResponse.json(responsePayload);
   } catch (error) {

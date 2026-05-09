@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
@@ -50,7 +49,6 @@ const STUDY_TABS: Array<{ id: StudyTab; label: string; hint: string }> = [
 
 const REVIEW_INTERVALS = [1, 3, 7, 14, 30];
 const QUICK_START_WORDS = ["salient", "efficient", "contemplate"] as const;
-const PREVIEW_CUES = ["用法", "近义词", "搭配", "记忆方法"] as const;
 
 const INITIAL_FAVORITES: FavoriteEntry[] = [];
 
@@ -184,8 +182,12 @@ function getWordFallback(): VocabularyWord {
   return FALLBACK_WORD;
 }
 
-function normalizeWord(word: VocabularyWord | Partial<VocabularyWord> | undefined): VocabularyWord {
+function normalizeWord(
+  word: VocabularyWord | Partial<VocabularyWord> | undefined,
+  options: { preserveGeneratedFields?: boolean } = {},
+): VocabularyWord {
   const fallback = getWordFallback();
+  const preserveGeneratedFields = options.preserveGeneratedFields ?? false;
 
   return {
     slug: word?.slug || fallback.slug,
@@ -212,19 +214,30 @@ function normalizeWord(word: VocabularyWord | Partial<VocabularyWord> | undefine
             (item): item is { label: UsageLabel; sentence: string } =>
               Boolean(item?.label) && Boolean(item?.sentence),
           )
-        : fallback.examples,
+        : preserveGeneratedFields
+          ? []
+          : fallback.examples,
     similarWords:
       Array.isArray(word?.similarWords) && word.similarWords.length > 0
         ? word.similarWords.filter(
             (item): item is { slug: string; word: string; note: string } =>
               Boolean(item?.slug) && Boolean(item?.word) && Boolean(item?.note),
           )
-        : fallback.similarWords,
+        : preserveGeneratedFields
+          ? []
+          : fallback.similarWords,
     memoryAids: {
-      etymology: word?.memoryAids?.etymology ?? fallback.memoryAids.etymology,
-      roots: word?.memoryAids?.roots ?? fallback.memoryAids.roots,
-      mnemonic: word?.memoryAids?.mnemonic ?? fallback.memoryAids.mnemonic,
+      etymology:
+        word?.memoryAids?.etymology ??
+        (preserveGeneratedFields ? "" : fallback.memoryAids.etymology),
+      roots:
+        word?.memoryAids?.roots ??
+        (preserveGeneratedFields ? "" : fallback.memoryAids.roots),
+      mnemonic:
+        word?.memoryAids?.mnemonic ??
+        (preserveGeneratedFields ? "" : fallback.memoryAids.mnemonic),
     },
+    studyNotes: word?.studyNotes,
     searchAliases:
       Array.isArray(word?.searchAliases) && word.searchAliases.length > 0
         ? word.searchAliases.filter(Boolean)
@@ -232,17 +245,26 @@ function normalizeWord(word: VocabularyWord | Partial<VocabularyWord> | undefine
   };
 }
 
-async function fetchWordFromApi(query: string) {
+type TranslateMode = "basic" | "study";
+type TranslatePayload = {
+  word: VocabularyWord;
+  model: string;
+  source?: string;
+  stage?: TranslateMode;
+  error?: string;
+};
+
+async function fetchWordFromApi(query: string, mode: TranslateMode) {
   const response = await fetch("/api/translate", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, mode }),
   });
 
   const payload = (await response.json()) as
-    | { word: VocabularyWord; model: string; source?: string; error?: string }
+    | TranslatePayload
     | { error?: string; details?: string };
 
   if (!response.ok) {
@@ -268,18 +290,20 @@ export function HomePage() {
   const [modelName, setModelName] = useState("openai/gpt-4o-mini");
   const [sourceLabel, setSourceLabel] = useState("OpenRouter");
   const [loading, setLoading] = useState(false);
+  const [studyCardGenerating, setStudyCardGenerating] = useState(false);
   const [status, setStatus] = useState("Type a word to generate a fresh card.");
   const [error, setError] = useState<string | null>(null);
   const lastFetchedQueryRef = useRef("");
+  const requestIdRef = useRef(0);
   const [favorites, setFavorites] = useState<FavoriteEntry[]>(INITIAL_FAVORITES);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
   const [authMessage, setAuthMessage] = useState("登录后，收藏和复习队列只会属于你自己。");
   const [favoritesLoading, setFavoritesLoading] = useState(false);
-  const [importing, setImporting] = useState(false);
   const normalizedFavorites = useMemo(
     () =>
       favorites
@@ -357,6 +381,7 @@ export function HomePage() {
 
   function askForLogin(message = "登录后才能收藏单词和使用个人复习队列。") {
     setAuthMode("login");
+    setAuthOpen(true);
     setAuthMessage(message);
     document.getElementById("word-islands-account")?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -380,6 +405,7 @@ export function HomePage() {
 
       setAuthUser(payload.user);
       setAuthPassword("");
+      setAuthOpen(false);
       setAuthMessage("已登录。现在收藏和复习队列会保存到你的账号。");
       await loadFavoritesForUser();
     } catch (caughtError) {
@@ -394,6 +420,7 @@ export function HomePage() {
     setAuthUser(null);
     setFavorites([]);
     setAuthPassword("");
+    setAuthOpen(false);
     setAuthMessage("已退出登录。游客仍然可以查词，收藏需要重新登录。");
   }
 
@@ -428,48 +455,6 @@ export function HomePage() {
     setFavorites((current) => current.filter((item) => item.word.slug !== slug));
   }
 
-  async function importLegacyFavorites(file: File) {
-    if (!authUser?.isAdmin) {
-      setAuthMessage("只有管理员账号可以导入旧收藏。");
-      return;
-    }
-
-    setImporting(true);
-    setAuthMessage("正在导入旧收藏...");
-
-    try {
-      const raw = await file.text();
-      const parsed = JSON.parse(raw) as { favorites?: FavoriteEntry[] } | FavoriteEntry[];
-      const favoritesToImport = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed.favorites)
-          ? parsed.favorites
-          : [];
-
-      const response = await fetch("/api/favorites/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ favorites: favoritesToImport }),
-      });
-      const payload = (await response.json()) as {
-        favorites?: FavoriteEntry[];
-        importedCount?: number;
-        error?: string;
-      };
-
-      if (!response.ok) {
-        throw new Error(payload.error || "导入失败，请检查 JSON 文件。");
-      }
-
-      setFavorites(Array.isArray(payload.favorites) ? payload.favorites : []);
-      setAuthMessage(`已导入 ${payload.importedCount ?? 0} 个旧收藏。`);
-    } catch (caughtError) {
-      setAuthMessage(caughtError instanceof Error ? caughtError.message : "导入失败，请检查 JSON 文件。");
-    } finally {
-      setImporting(false);
-    }
-  }
-
   async function loadWord(nextQuery: string, options?: { updateUrl?: boolean; recordHistory?: boolean }) {
     const trimmed = nextQuery.trim();
 
@@ -479,39 +464,71 @@ export function HomePage() {
 
     const updateUrl = options?.updateUrl ?? true;
     const recordHistory = options?.recordHistory ?? true;
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
 
     setQuery(trimmed);
     setLoading(true);
+    setStudyCardGenerating(true);
     setError(null);
-    setStatus("Generating a structured card...");
+    setStatus("正在加载基础释义...");
 
     if (updateUrl) {
       router.replace(`/?q=${encodeURIComponent(trimmed)}`, { scroll: false });
     }
 
     try {
-      const payload = await fetchWordFromApi(trimmed);
-      setSelectedWord(normalizeWord(payload.word));
-      setModelName(payload.model);
-      setSourceLabel(payload.source ?? "OpenRouter");
-      setStatus(
-        payload.source === "mock"
-          ? payload.error
-            ? `OpenRouter call failed: ${payload.error}`
-            : "OpenRouter is not configured yet, so this is a local demo card."
-          : `Generated by ${payload.model}.`,
+      const basicPayload = await fetchWordFromApi(trimmed, "basic");
+      if (requestId !== requestIdRef.current) {
+        return;
+      }
+
+      setSelectedWord(
+        normalizeWord(basicPayload.word, {
+          preserveGeneratedFields: basicPayload.stage === "basic",
+        }),
       );
+      setModelName(basicPayload.model);
+      setSourceLabel(basicPayload.source ?? "basic");
+      setStatus(
+        basicPayload.stage === "study"
+          ? "Study Card 已从缓存读取。"
+          : "基础释义已显示，Study Card 正在生成中...",
+      );
+      setStudyCardGenerating(basicPayload.stage !== "study");
 
       if (recordHistory) {
         recordSearch({
           query: trimmed,
           href: `/?q=${encodeURIComponent(trimmed)}`,
-          title: payload.word.title,
+          title: basicPayload.word.title,
         });
       }
 
+      if (basicPayload.stage === "study") {
+        lastFetchedQueryRef.current = trimmed;
+        return;
+      }
+
+      const studyPayload = await fetchWordFromApi(trimmed, "study");
+      if (requestId !== requestIdRef.current) {
+        return;
+      }
+
+      setSelectedWord(normalizeWord(studyPayload.word));
+      setModelName(studyPayload.model);
+      setSourceLabel(studyPayload.source ?? "OpenRouter");
+      setStudyCardGenerating(false);
+      setStatus(
+        studyPayload.source?.includes("cache")
+          ? "Study Card 已从缓存读取。"
+          : "Study Card 已生成。",
+      );
       lastFetchedQueryRef.current = trimmed;
     } catch (caughtError) {
+      if (requestId !== requestIdRef.current) {
+        return;
+      }
       const message =
         caughtError instanceof Error
           ? caughtError.message
@@ -519,7 +536,8 @@ export function HomePage() {
       setError(message);
       setModelName("error");
       setSourceLabel("error");
-      setStatus(`OpenRouter error: ${message}`);
+      setStudyCardGenerating(false);
+      setStatus(`Study Card 生成失败：${message}`);
 
       if (recordHistory) {
         recordSearch({
@@ -529,7 +547,9 @@ export function HomePage() {
         });
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }
 
@@ -570,8 +590,6 @@ export function HomePage() {
     setActiveTab("meaning");
     void loadWord(nextQuery, { updateUrl: true, recordHistory: true });
   }
-
-  const previewExample = selectedWord.examples.at(0)?.sentence ?? selectedWord.summary;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -666,6 +684,89 @@ export function HomePage() {
           <div className="absolute right-0 top-0 h-40 w-56 bg-[radial-gradient(circle_at_top_right,rgba(86,101,58,0.14),transparent_72%)]" />
           <div className="absolute bottom-0 right-12 h-24 w-24 rounded-full border border-white/30 bg-white/20 blur-[2px]" />
 
+          <div id="word-islands-account" className="relative z-20 mb-8 flex justify-end">
+            <div className="flex items-center gap-2 rounded-full border border-[#d8cfbe] bg-white/68 p-1 shadow-[0_10px_30px_rgba(63,57,36,0.05)] backdrop-blur-sm">
+              {authUser ? (
+                <>
+                  <span className="max-w-[11rem] truncate px-3 text-xs font-semibold text-[#625b4f]">
+                    {authUser.email}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void logout()}
+                    className="rounded-full border border-[#d9d1bf] bg-white/85 px-3 py-1.5 text-xs font-semibold text-[#191813] transition hover:border-[#9c8c63] hover:bg-white"
+                  >
+                    退出
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode("login");
+                      setAuthOpen((open) => !open || authMode !== "login");
+                      setAuthMessage("登录后，收藏和复习队列只会属于你自己。");
+                    }}
+                    className="rounded-full bg-[#191813] px-4 py-2 text-xs font-semibold text-[#f7f2e8] transition hover:bg-[#303024]"
+                  >
+                    登录
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode("register");
+                      setAuthOpen((open) => !open || authMode !== "register");
+                      setAuthMessage("注册后即可保存个人收藏和复习队列。");
+                    }}
+                    className="rounded-full border border-[#d9d1bf] bg-white/78 px-4 py-2 text-xs font-semibold text-[#625b4f] transition hover:border-[#9c8c63] hover:bg-white hover:text-[#191813]"
+                  >
+                    注册
+                  </button>
+                </>
+              )}
+            </div>
+
+            {!authUser && authOpen ? (
+              <form
+                onSubmit={submitAuth}
+                className="absolute right-0 top-12 w-[min(22rem,calc(100vw-3rem))] rounded-[24px] border border-[#d8cfbe] bg-[#fffaf1]/95 p-3 shadow-[0_20px_60px_rgba(63,57,36,0.12)] backdrop-blur-md"
+              >
+                <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-[#7a705f]">
+                  {authMode === "login" ? "Login" : "Register"}
+                </p>
+                <input
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder="邮箱"
+                  type="email"
+                  className="mt-3 min-h-10 w-full rounded-full border border-[#d9d1bf] bg-white/88 px-3 text-xs text-[#191813] outline-none placeholder:text-[#8b8477]"
+                  autoComplete="email"
+                />
+                <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+                  <input
+                    value={authPassword}
+                    onChange={(event) => setAuthPassword(event.target.value)}
+                    placeholder="密码"
+                    type="password"
+                    className="min-h-10 rounded-full border border-[#d9d1bf] bg-white/88 px-3 text-xs text-[#191813] outline-none placeholder:text-[#8b8477]"
+                    autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                  />
+                  <button
+                    type="submit"
+                    disabled={authBusy}
+                    className="min-h-10 rounded-full bg-[#191813] px-4 text-xs font-semibold text-[#f7f2e8] transition hover:bg-[#303024] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {authBusy ? "..." : authMode === "login" ? "登录" : "注册"}
+                  </button>
+                </div>
+                <p className="mt-2 text-[11px] leading-5 text-[#8b5d22]" aria-live="polite">
+                  {authMessage}
+                </p>
+              </form>
+            ) : null}
+          </div>
+
           <div className="relative space-y-6">
             <div className="max-w-3xl space-y-3">
               <span className="inline-flex items-center rounded-full border border-[#d7cfbd] bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.28em] text-[#6a7258] shadow-[0_8px_24px_rgba(63,57,36,0.05)]">
@@ -752,187 +853,11 @@ export function HomePage() {
               </div>
             </form>
 
-            <div className="rounded-[32px] border border-[#d9d1bf] bg-[linear-gradient(180deg,rgba(255,255,255,0.78),rgba(249,244,234,0.86))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.82)] sm:p-5">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div className="max-w-2xl">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#7a705f]">
-                    Study Card Preview
-                  </p>
-                  <div className="mt-3 flex flex-wrap items-end gap-x-3 gap-y-2">
-                    <h2 className="text-3xl font-semibold tracking-tight text-[#191813] sm:text-[2.5rem]">
-                      {selectedWord.title}
-                    </h2>
-                    <span className="rounded-full border border-[#d9d1bf] bg-white/80 px-3 py-1 text-[11px] font-semibold text-[#625b4f]">
-                      {selectedWord.partOfSpeech}
-                    </span>
-                  </div>
-                  <p className="mt-3 max-w-xl text-sm leading-7 text-[#625b4f] sm:text-[15px]">
-                    {selectedWord.summary}
-                  </p>
-                </div>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                {PREVIEW_CUES.map((item) => (
-                  <span
-                    key={item}
-                    className="rounded-full border border-[#d9d1bf] bg-[#f9f4ea] px-3 py-1 text-xs font-semibold text-[#625b4f]"
-                  >
-                    {item}
-                  </span>
-                ))}
-              </div>
-
-              <div className="mt-4 grid gap-3 lg:grid-cols-[1.15fr_0.85fr]">
-                <div className="rounded-[24px] border border-[#d9d1bf] bg-white/80 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#7a705f]">
-                    Meaning snapshot
-                  </p>
-                  <p className="mt-3 text-sm font-medium text-[#191813]">
-                    {selectedWord.englishDefinition}
-                  </p>
-                  <p className="mt-2 text-sm leading-7 text-[#625b4f]">
-                    {selectedWord.chineseMeaning}
-                  </p>
-                </div>
-
-                <div className="rounded-[24px] border border-[#d9d1bf] bg-[#f9f4ea] p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#7a705f]">
-                    Learning glimpse
-                  </p>
-                  <p className="mt-3 text-sm leading-7 text-[#625b4f]">
-                    {previewExample}
-                  </p>
-                  <p className="mt-3 text-sm text-[#6d6659]">
-                    你会继续看到近义词区分、常见搭配和记忆方法，而不只是一个翻译结果。
-                  </p>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </section>
 
       <section className="mx-auto mt-6 w-full max-w-6xl space-y-6">
-        <section
-          id="word-islands-account"
-          className="rounded-[32px] border border-[#d8d0be] bg-white/72 p-5 shadow-[0_18px_60px_rgba(63,57,36,0.05)] sm:p-6"
-        >
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.32em] text-[#7a705f]">
-                Account
-              </p>
-              <h3 className="mt-2 text-2xl font-semibold tracking-tight text-[#191813]">
-                {authUser ? "个人学习记录" : "登录后保存收藏"}
-              </h3>
-              <p className="mt-3 max-w-2xl text-sm leading-7 text-[#625b4f]">
-                {authUser
-                  ? `当前账号：${authUser.email}。你的收藏和复习队列会保存到这个账号。`
-                  : "游客可以直接查词；收藏单词、复习队列和旧记录导入需要登录。"}
-              </p>
-            </div>
-
-            {authUser ? (
-              <button
-                type="button"
-                onClick={() => void logout()}
-                className="rounded-full border border-[#d9d1bf] bg-white/85 px-4 py-2 text-sm font-semibold text-[#191813] transition hover:border-[#9c8c63] hover:bg-white"
-              >
-                退出登录
-              </button>
-            ) : null}
-          </div>
-
-          {authUser ? (
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              <span className="rounded-full border border-[#d9d1bf] bg-[#f9f4ea] px-3 py-2 text-xs font-semibold text-[#625b4f]">
-                已登录
-              </span>
-              {authUser.isAdmin ? (
-                <label className="cursor-pointer rounded-full border border-[#191813] bg-[#191813] px-4 py-2 text-xs font-semibold text-[#f7f2e8] transition hover:bg-[#303024]">
-                  {importing ? "正在导入..." : "导入旧收藏 JSON"}
-                  <input
-                    type="file"
-                    accept="application/json"
-                    className="sr-only"
-                    disabled={importing}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        void importLegacyFavorites(file);
-                      }
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                </label>
-              ) : null}
-            </div>
-          ) : (
-            <form onSubmit={submitAuth} className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-              <input
-                value={authEmail}
-                onChange={(event) => setAuthEmail(event.target.value)}
-                placeholder="邮箱"
-                type="email"
-                className="min-h-12 rounded-full border border-[#d9d1bf] bg-white/86 px-4 text-sm text-[#191813] outline-none placeholder:text-[#8b8477]"
-                autoComplete="email"
-              />
-              <input
-                value={authPassword}
-                onChange={(event) => setAuthPassword(event.target.value)}
-                placeholder="密码，至少 8 位"
-                type="password"
-                className="min-h-12 rounded-full border border-[#d9d1bf] bg-white/86 px-4 text-sm text-[#191813] outline-none placeholder:text-[#8b8477]"
-                autoComplete={authMode === "login" ? "current-password" : "new-password"}
-              />
-              <button
-                type="submit"
-                disabled={authBusy}
-                className="min-h-12 rounded-full bg-[#191813] px-5 text-sm font-semibold text-[#f7f2e8] transition hover:bg-[#303024] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {authBusy ? "处理中" : authMode === "login" ? "登录" : "注册"}
-              </button>
-              <div className="flex flex-wrap items-center gap-2 md:col-span-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("login");
-                    setAuthMessage("登录后，收藏和复习队列只会属于你自己。");
-                  }}
-                  className={cn(
-                    "rounded-full border px-3 py-1 text-xs font-semibold",
-                    authMode === "login"
-                      ? "border-[#191813] bg-[#191813] text-[#f7f2e8]"
-                      : "border-[#d9d1bf] bg-white/80 text-[#625b4f]",
-                  )}
-                >
-                  已有账号
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("register");
-                    setAuthMessage("注册后即可保存个人收藏和复习队列。");
-                  }}
-                  className={cn(
-                    "rounded-full border px-3 py-1 text-xs font-semibold",
-                    authMode === "register"
-                      ? "border-[#191813] bg-[#191813] text-[#f7f2e8]"
-                      : "border-[#d9d1bf] bg-white/80 text-[#625b4f]",
-                  )}
-                >
-                  创建账号
-                </button>
-              </div>
-            </form>
-          )}
-
-          <p className="mt-3 text-sm leading-7 text-[#8b5d22]" aria-live="polite">
-            {authMessage}
-          </p>
-        </section>
-
         <section className="rounded-[36px] border border-[#d8d0be] bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(247,240,225,0.82))] p-5 shadow-[0_20px_70px_rgba(63,57,36,0.07)] sm:p-6">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="max-w-3xl">
@@ -960,12 +885,6 @@ export function HomePage() {
                 >
                   {!authUser ? "登录后收藏" : isFavorited ? "取消收藏" : "收藏单词"}
                 </button>
-                <Link
-                  href={`/word/${selectedWord.slug}`}
-                  className="inline-flex min-h-11 items-center justify-center rounded-full border border-[#d9d1bf] bg-white/75 px-4 text-sm font-semibold text-[#191813] transition hover:border-[#9c8c63] hover:bg-white"
-                >
-                  打开独立词条
-                </Link>
               </div>
             </div>
 
@@ -988,6 +907,8 @@ export function HomePage() {
                 </span>
               ))}
             </div>
+
+            {studyCardGenerating ? <StudyCardGeneratingNotice /> : null}
 
             <div className="mt-6 rounded-[30px] border border-[#d9d1bf] bg-white/72 p-2">
               <div className="flex gap-2 overflow-x-auto scrollbar-hide">
@@ -1052,10 +973,20 @@ export function HomePage() {
                       </div>
                     </div>
                   </div>
+                  {!studyCardGenerating && selectedWord.studyNotes ? (
+                    <div className="lg:col-span-2 grid gap-4 lg:grid-cols-3">
+                      <Panel label="使用场景" value={selectedWord.studyNotes.usageScene} tone="warm" />
+                      <Panel label="易错点" value={selectedWord.studyNotes.commonMistake} />
+                      <Panel label="写作 / 汇报用法" value={selectedWord.studyNotes.writingUsage} />
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
               {activeTab === "difference" ? (
+                studyCardGenerating ? (
+                  <StudyCardGeneratingNotice compact />
+                ) : (
                 <div className="grid gap-4">
                   <div className="rounded-[30px] border border-[#d9d1bf] bg-white/70 p-4 sm:p-5">
                     <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#7a705f]">
@@ -1088,6 +1019,7 @@ export function HomePage() {
                     </article>
                   ))}
                 </div>
+                )
               ) : null}
 
               {activeTab === "collocations" ? (
@@ -1112,6 +1044,9 @@ export function HomePage() {
               ) : null}
 
               {activeTab === "examples" ? (
+                studyCardGenerating ? (
+                  <StudyCardGeneratingNotice compact />
+                ) : (
                 <div className="space-y-4">
                   {selectedWord.examples.map((example) => (
                     <article
@@ -1132,14 +1067,19 @@ export function HomePage() {
                     </article>
                   ))}
                 </div>
+                )
               ) : null}
 
               {activeTab === "memory" ? (
-                <div className="grid gap-4 lg:grid-cols-3">
-                  <Panel label="词源提示" value={selectedWord.memoryAids.etymology} tone="warm" />
-                  <Panel label="核心拆解" value={selectedWord.memoryAids.roots} />
-                  <Panel label="记忆口诀" value={selectedWord.memoryAids.mnemonic} />
-                </div>
+                studyCardGenerating ? (
+                  <StudyCardGeneratingNotice compact />
+                ) : (
+                  <div className="grid gap-4 lg:grid-cols-3">
+                    <Panel label="词源提示" value={selectedWord.memoryAids.etymology} tone="warm" />
+                    <Panel label="核心拆解" value={selectedWord.memoryAids.roots} />
+                    <Panel label="记忆口诀" value={selectedWord.memoryAids.mnemonic} />
+                  </div>
+                )
               ) : null}
             </div>
         </section>
@@ -1247,6 +1187,24 @@ type PanelProps = {
   value: string;
   tone?: "default" | "warm";
 };
+
+function StudyCardGeneratingNotice({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      className={cn(
+        "rounded-[28px] border border-[#d9d1bf] bg-[linear-gradient(135deg,rgba(249,244,234,0.92),rgba(255,255,255,0.74))] text-[#625b4f]",
+        compact ? "p-4" : "mt-5 p-4 sm:p-5",
+      )}
+    >
+      <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#7a705f]">
+        Study Card 正在生成中
+      </p>
+      <p className="mt-2 text-sm leading-7">
+        基础释义已经先显示。AI 正在补充近义词区别、记忆方法、真实例句、易错点和写作/汇报用法。
+      </p>
+    </div>
+  );
+}
 
 function Panel({ label, value, tone = "default" }: PanelProps) {
   return (

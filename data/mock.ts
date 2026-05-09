@@ -31,6 +31,11 @@ export type VocabularyWord = {
     roots: string;
     mnemonic: string;
   };
+  studyNotes?: {
+    usageScene: string;
+    commonMistake: string;
+    writingUsage: string;
+  };
   searchAliases: string[];
 };
 
