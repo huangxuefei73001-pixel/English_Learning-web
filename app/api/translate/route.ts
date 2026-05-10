@@ -47,6 +47,12 @@ const APP_TITLE =
   process.env.OPENROUTER_TITLE?.trim() ??
   process.env.OPENROUTER_APP_TITLE?.trim() ??
   "English_Learning";
+const DEFAULT_FALLBACK_MODELS = [
+  "openrouter/auto",
+  "google/gemini-2.5-flash",
+  "deepseek/deepseek-chat",
+  "qwen/qwen3-235b-a22b",
+];
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 type WordCachePayload = { model: string; source: string; stage?: string; word: unknown };
 type WordCacheEntry = { expiresAt: number; payload: WordCachePayload };
@@ -428,6 +434,15 @@ function findCriticalCardIssues(card: VocabularyCard) {
 
 function normalizeQueryKey(query: string) {
   return query.trim().toLowerCase();
+}
+
+function resolveAttemptModels() {
+  const configuredFallbacks =
+    process.env.OPENROUTER_FALLBACK_MODELS?.split(",")
+      .map((item) => item.trim())
+      .filter(Boolean) ?? [];
+
+  return [...new Set([MODEL, ...configuredFallbacks, ...DEFAULT_FALLBACK_MODELS])];
 }
 
 async function loadWordCacheFromFile() {
@@ -950,13 +965,12 @@ export async function POST(request: Request) {
       );
     }
 
-    const primaryModel = MODEL;
-    const fallbackModel = "openrouter/auto";
-    const attemptModels = primaryModel === fallbackModel ? [primaryModel] : [primaryModel, fallbackModel];
+    const attemptModels = resolveAttemptModels();
 
     let rawWord: unknown = null;
-    let usedModel = primaryModel;
+    let usedModel = attemptModels[0] ?? MODEL;
     let parsedIssues: string[] = [];
+    const modelErrors: string[] = [];
 
     for (const model of attemptModels) {
       try {
@@ -998,19 +1012,36 @@ export async function POST(request: Request) {
         break;
       } catch (error) {
         const message = describeRequestError(error).toLowerCase();
-        const isAvailabilityError =
+        const isRecoverableModelError =
           message.includes("not available in your region") ||
           message.includes("no model") ||
           message.includes("no provider") ||
           message.includes("model is not available") ||
-          message.includes("unavailable");
+          message.includes("unavailable") ||
+          message.includes("internal server error") ||
+          message.includes("status=500") ||
+          message.includes("status=502") ||
+          message.includes("status=503") ||
+          message.includes("status=504");
 
-        if (model !== fallbackModel && isAvailabilityError) {
+        modelErrors.push(`${model}: ${describeRequestError(error)}`);
+
+        if (isRecoverableModelError) {
+          console.warn("OpenRouter model failed; trying next model", {
+            query,
+            model,
+            error: describeRequestError(error),
+            remainingModels: attemptModels.slice(attemptModels.indexOf(model) + 1),
+          });
           continue;
         }
 
         throw error;
       }
+    }
+
+    if (!rawWord) {
+      throw new Error(`OpenRouter models all failed: ${modelErrors.join(" | ")}`);
     }
 
     const structuredWord = rawWord as VocabularyCard;
