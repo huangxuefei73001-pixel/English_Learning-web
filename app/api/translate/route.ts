@@ -3,56 +3,19 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveWordForQuery, type VocabularyWord } from "@/data/mock";
 
-const MODEL =
-  process.env.OPENROUTER_MODEL ??
-  process.env.OPENAI_MODEL ??
-  "openrouter/auto";
+const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL?.trim() || "https://api.deepseek.com/v1/chat/completions";
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY?.trim() || "";
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash";
+const XIAOMI_API_URL = process.env.XIAOMI_API_URL?.trim() || "";
+const XIAOMI_API_KEY = process.env.XIAOMI_API_KEY?.trim() || "";
+const XIAOMI_MODEL = process.env.XIAOMI_MODEL?.trim() || "";
 
-function normalizeOpenRouterUrl(value: string) {
-  const trimmed = value.trim().replace(/\/+$/, "");
-  if (trimmed.endsWith("/chat/completions")) {
-    return trimmed;
-  }
-
-  if (trimmed.endsWith("/responses")) {
-    return `${trimmed.slice(0, -"/responses".length)}/chat/completions`;
-  }
-
-  return `${trimmed}/chat/completions`;
-}
-
-function resolveOpenRouterUrl() {
-  const explicitUrl = process.env.OPENROUTER_API_URL?.trim() ?? process.env.OPENAI_API_URL?.trim();
-  if (explicitUrl) {
-    return normalizeOpenRouterUrl(explicitUrl);
-  }
-
-  const baseUrl =
-    process.env.OPENROUTER_BASE_URL?.trim() ??
-    process.env.OPENAI_BASE_URL?.trim();
-  if (baseUrl) {
-    return normalizeOpenRouterUrl(baseUrl);
-  }
-
-  return "https://openrouter.ai/api/v1/chat/completions";
-}
-
-const OPENROUTER_API_URL = resolveOpenRouterUrl();
-const API_KEY = process.env.OPENROUTER_API_KEY ?? process.env.OPENAI_API_KEY;
-const HTTP_REFERER =
-  process.env.OPENROUTER_HTTP_REFERER?.trim() ??
-  process.env.OPENROUTER_SITE_URL?.trim() ??
-  "";
-const APP_TITLE =
-  process.env.OPENROUTER_TITLE?.trim() ??
-  process.env.OPENROUTER_APP_TITLE?.trim() ??
-  "English_Learning";
-const DEFAULT_FALLBACK_MODELS = [
-  "openrouter/auto",
-  "google/gemini-2.5-flash",
-  "deepseek/deepseek-chat",
-  "qwen/qwen3-235b-a22b",
-];
+type ProviderConfig = {
+  id: "deepseek" | "xiaomi";
+  url: string;
+  apiKey: string;
+  model: string;
+};
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 type WordCachePayload = { model: string; source: string; stage?: string; word: unknown };
 type WordCacheEntry = { expiresAt: number; payload: WordCachePayload };
@@ -436,13 +399,28 @@ function normalizeQueryKey(query: string) {
   return query.trim().toLowerCase();
 }
 
-function resolveAttemptModels() {
-  const configuredFallbacks =
-    process.env.OPENROUTER_FALLBACK_MODELS?.split(",")
-      .map((item) => item.trim())
-      .filter(Boolean) ?? [];
+function resolveProviderSequence() {
+  const providers: ProviderConfig[] = [];
 
-  return [...new Set([MODEL, ...configuredFallbacks, ...DEFAULT_FALLBACK_MODELS])];
+  if (DEEPSEEK_API_KEY) {
+    providers.push({
+      id: "deepseek",
+      url: DEEPSEEK_API_URL,
+      apiKey: DEEPSEEK_API_KEY,
+      model: DEEPSEEK_MODEL,
+    });
+  }
+
+  if (XIAOMI_API_KEY && XIAOMI_API_URL && XIAOMI_MODEL) {
+    providers.push({
+      id: "xiaomi",
+      url: XIAOMI_API_URL,
+      apiKey: XIAOMI_API_KEY,
+      model: XIAOMI_MODEL,
+    });
+  }
+
+  return providers;
 }
 
 async function loadWordCacheFromFile() {
@@ -660,22 +638,25 @@ function extractJsonCandidate(text: string) {
 class ModelParseError extends Error {
   rawContent: string;
   candidate: string;
+  provider: string;
   model: string;
   status: number;
 
-  constructor(message: string, options: { rawContent: string; candidate: string; model: string; status: number }) {
+  constructor(message: string, options: { rawContent: string; candidate: string; provider: string; model: string; status: number }) {
     super(message);
     this.name = "ModelParseError";
     this.rawContent = options.rawContent;
     this.candidate = options.candidate;
+    this.provider = options.provider;
     this.model = options.model;
     this.status = options.status;
   }
 }
 
-function parseStructuredJson(text: string, context: { model: string; status: number }) {
+function parseStructuredJson(text: string, context: { provider: string; model: string; status: number }) {
   const candidate = extractJsonCandidate(text);
-  console.info("OpenRouter JSON candidate", {
+  console.info("AI JSON candidate", {
+    provider: context.provider,
     model: context.model,
     status: context.status,
     candidate,
@@ -684,7 +665,7 @@ function parseStructuredJson(text: string, context: { model: string; status: num
   try {
     return JSON.parse(candidate) as unknown;
   } catch (error) {
-    console.error("OpenRouter JSON parse failed", {
+    console.error("AI JSON parse failed", {
       ...context,
       error: describeRequestError(error),
       rawText: text,
@@ -695,6 +676,7 @@ function parseStructuredJson(text: string, context: { model: string; status: num
       {
         rawContent: text,
         candidate,
+        provider: context.provider,
         model: context.model,
         status: context.status,
       },
@@ -731,50 +713,26 @@ function describeRequestError(error: unknown) {
   return segments.join(" | ");
 }
 
-async function callOpenRouter(
+async function callProvider(
+  provider: ProviderConfig,
   query: string,
-  model: string,
   previousJson?: unknown,
   issues?: string[],
-  options: { responseMode?: "schema" | "json_object" | "text" } = {},
 ) {
-  const responseMode = options.responseMode ?? "schema";
   const userPrompt = previousJson && issues?.length
     ? buildRepairPrompt(query, previousJson, issues)
     : buildUserPrompt(query);
   const prompt = `${SYSTEM_PROMPT}\n\n${userPrompt}`;
-  console.info("OpenRouter request prompt", { query, model, prompt, responseMode });
+  console.info("AI request prompt", { provider: provider.id, model: provider.model, query, prompt });
 
-  const responseFormat =
-    responseMode === "schema"
-      ? {
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: "vocabulary_card",
-              strict: true,
-              schema: WORD_SCHEMA,
-            },
-          },
-        }
-      : responseMode === "json_object"
-        ? {
-            response_format: {
-              type: "json_object",
-            },
-          }
-        : {};
-
-  const response = await fetch(OPENROUTER_API_URL, {
+  const response = await fetch(provider.url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-      ...(HTTP_REFERER ? { "HTTP-Referer": HTTP_REFERER } : {}),
-      ...(APP_TITLE ? { "X-Title": APP_TITLE } : {}),
+      Authorization: `Bearer ${provider.apiKey}`,
     },
     body: JSON.stringify({
-      model,
+      model: provider.model,
       messages: [
         {
           role: "system",
@@ -785,18 +743,17 @@ async function callOpenRouter(
           content: userPrompt,
         },
       ],
-      ...responseFormat,
       temperature: 0.2,
     }),
   });
 
   const rawBody = await response.text();
-  console.info("OpenRouter raw body", {
+  console.info("AI raw body", {
+    provider: provider.id,
     query,
-    model,
+    model: provider.model,
     status: response.status,
     rawBody,
-    responseMode,
   });
   let payload: {
     error?: { message?: string };
@@ -812,65 +769,44 @@ async function callOpenRouter(
   } catch {
     payload = {
       error: {
-        message: rawBody.trim() || `OpenAI returned a non-JSON response (status ${response.status}).`,
+        message: rawBody.trim() || `AI provider returned a non-JSON response (status ${response.status}).`,
       },
     };
   }
 
   if (!response.ok) {
-    if (responseMode === "schema" && response.status >= 500) {
-      console.warn("OpenRouter JSON schema request failed; retrying with plain JSON mode", {
-        query,
-        model,
-        status: response.status,
-        rawBody,
-      });
-      return callOpenRouter(query, model, previousJson, issues, { responseMode: "json_object" });
-    }
-
-    if (responseMode === "json_object" && response.status >= 500) {
-      console.warn("OpenRouter JSON object request failed; retrying without response_format", {
-        query,
-        model,
-        status: response.status,
-        rawBody,
-      });
-      return callOpenRouter(query, model, previousJson, issues, { responseMode: "text" });
-    }
-
     throw new Error(
-      `${payload.error?.message ?? "OpenRouter request failed."} (status=${response.status}, model=${model})`,
+      `${payload.error?.message ?? "AI provider request failed."} (status=${response.status}, provider=${provider.id}, model=${provider.model})`,
     );
   }
 
   const text = extractMessageText(payload);
   if (!text) {
-    console.error("OpenRouter returned an empty assistant message", {
+    console.error("AI provider returned an empty assistant message", {
+      provider: provider.id,
       status: response.status,
-      model,
+      model: provider.model,
       payload,
     });
-    throw new Error(`OpenRouter returned no JSON text. (status=${response.status}, model=${model})`);
+    throw new Error(`AI provider returned no JSON text. (status=${response.status}, provider=${provider.id}, model=${provider.model})`);
   }
 
-  const word = parseStructuredJson(text, { model, status: response.status });
+  const word = parseStructuredJson(text, { provider: provider.id, model: provider.model, status: response.status });
   return word;
 }
 
-async function repairMalformedJson(query: string, model: string, malformed: string) {
+async function repairMalformedJson(provider: ProviderConfig, query: string, malformed: string) {
   const userPrompt = buildMalformedJsonRepairPrompt(query, malformed);
-  console.info("OpenRouter malformed JSON repair prompt", { query, model, prompt: userPrompt });
+  console.info("AI malformed JSON repair prompt", { provider: provider.id, model: provider.model, query, prompt: userPrompt });
 
-  const response = await fetch(OPENROUTER_API_URL, {
+  const response = await fetch(provider.url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-      ...(HTTP_REFERER ? { "HTTP-Referer": HTTP_REFERER } : {}),
-      ...(APP_TITLE ? { "X-Title": APP_TITLE } : {}),
+      Authorization: `Bearer ${provider.apiKey}`,
     },
     body: JSON.stringify({
-      model,
+      model: provider.model,
       messages: [
         {
           role: "system",
@@ -886,9 +822,10 @@ async function repairMalformedJson(query: string, model: string, malformed: stri
   });
 
   const rawBody = await response.text();
-  console.info("OpenRouter malformed JSON repair raw body", {
+  console.info("AI malformed JSON repair raw body", {
+    provider: provider.id,
     query,
-    model,
+    model: provider.model,
     status: response.status,
     rawBody,
   });
@@ -907,21 +844,25 @@ async function repairMalformedJson(query: string, model: string, malformed: stri
   } catch {
     payload = {
       error: {
-        message: rawBody.trim() || `OpenRouter returned a non-JSON repair response (status ${response.status}).`,
+        message: rawBody.trim() || `AI provider returned a non-JSON repair response (status ${response.status}).`,
       },
     };
   }
 
   if (!response.ok) {
-    throw new Error(`${payload.error?.message ?? "OpenRouter repair request failed."} (status=${response.status}, model=${model})`);
+    throw new Error(
+      `${payload.error?.message ?? "AI provider repair request failed."} (status=${response.status}, provider=${provider.id}, model=${provider.model})`,
+    );
   }
 
   const text = extractMessageText(payload);
   if (!text) {
-    throw new Error(`OpenRouter returned no repair JSON text. (status=${response.status}, model=${model})`);
+    throw new Error(
+      `AI provider returned no repair JSON text. (status=${response.status}, provider=${provider.id}, model=${provider.model})`,
+    );
   }
 
-  return parseStructuredJson(text, { model, status: response.status });
+  return parseStructuredJson(text, { provider: provider.id, model: provider.model, status: response.status });
 }
 
 export async function POST(request: Request) {
@@ -956,30 +897,31 @@ export async function POST(request: Request) {
       });
     }
 
-    if (!API_KEY) {
+    const providers = resolveProviderSequence();
+
+    if (!DEEPSEEK_API_KEY) {
       return NextResponse.json(
         {
-          error: "Missing OPENROUTER_API_KEY. Configure the server environment before searching.",
+          error: "Missing DEEPSEEK_API_KEY. Configure the server environment before searching.",
         },
         { status: 500 },
       );
     }
 
-    const attemptModels = resolveAttemptModels();
-
     let rawWord: unknown = null;
-    let usedModel = attemptModels[0] ?? MODEL;
+    let usedModel = providers[0]?.model ?? DEEPSEEK_MODEL;
+    let usedProvider: ProviderConfig["id"] = providers[0]?.id ?? "deepseek";
     let parsedIssues: string[] = [];
-    const modelErrors: string[] = [];
+    const providerErrors: string[] = [];
 
-    for (const model of attemptModels) {
+    for (const provider of providers) {
       try {
         try {
-          rawWord = sanitizeCard(await callOpenRouter(query, model) as VocabularyCard, query);
+          rawWord = sanitizeCard(await callProvider(provider, query) as VocabularyCard, query);
         } catch (error) {
           if (error instanceof ModelParseError) {
             rawWord = sanitizeCard(
-              await repairMalformedJson(query, model, error.candidate || error.rawContent) as VocabularyCard,
+              await repairMalformedJson(provider, query, error.candidate || error.rawContent) as VocabularyCard,
               query,
             );
           } else {
@@ -989,49 +931,51 @@ export async function POST(request: Request) {
         parsedIssues = findCardIssues(rawWord as VocabularyCard);
         const criticalIssues = findCriticalCardIssues(rawWord as VocabularyCard);
         if (parsedIssues.length > 0) {
-          console.warn("OpenRouter returned partial card", { query, model, parsedIssues, rawWord });
+          console.warn("AI provider returned partial card", { query, provider: provider.id, model: provider.model, parsedIssues, rawWord });
         }
         if (criticalIssues.length > 0) {
           const repairedWord = sanitizeCard(
-            await callOpenRouter(query, model, rawWord, criticalIssues.slice(0, 6)) as VocabularyCard,
+            await callProvider(provider, query, rawWord, criticalIssues.slice(0, 6)) as VocabularyCard,
             query,
           );
           const repairIssues = findCriticalCardIssues(repairedWord as VocabularyCard);
           if (repairIssues.length > 0) {
-            console.error("OpenRouter repair still incomplete", {
+            console.error("AI provider repair still incomplete", {
               query,
-              model,
+              provider: provider.id,
+              model: provider.model,
               repairIssues,
               repairedWord,
             });
-            throw new Error(`OpenRouter returned incomplete content after retry: ${repairIssues.join("; ")}`);
+            throw new Error(`AI provider returned incomplete content after retry: ${repairIssues.join("; ")}`);
           }
           rawWord = repairedWord;
         }
-        usedModel = model;
+        usedModel = provider.model;
+        usedProvider = provider.id;
         break;
       } catch (error) {
         const message = describeRequestError(error).toLowerCase();
-        const isRecoverableModelError =
-          message.includes("not available in your region") ||
-          message.includes("no model") ||
-          message.includes("no provider") ||
-          message.includes("model is not available") ||
-          message.includes("unavailable") ||
+        const isRecoverableProviderError =
           message.includes("internal server error") ||
+          message.includes("provider request failed") ||
           message.includes("status=500") ||
           message.includes("status=502") ||
           message.includes("status=503") ||
           message.includes("status=504");
 
-        modelErrors.push(`${model}: ${describeRequestError(error)}`);
+        providerErrors.push(`${provider.id}/${provider.model}: ${describeRequestError(error)}`);
 
-        if (isRecoverableModelError) {
-          console.warn("OpenRouter model failed; trying next model", {
+        if (isRecoverableProviderError) {
+          console.warn("AI provider failed; trying next provider", {
             query,
-            model,
+            provider: provider.id,
+            model: provider.model,
             error: describeRequestError(error),
-            remainingModels: attemptModels.slice(attemptModels.indexOf(model) + 1),
+            remainingProviders: providers.slice(providers.indexOf(provider) + 1).map((item) => ({
+              provider: item.id,
+              model: item.model,
+            })),
           });
           continue;
         }
@@ -1041,7 +985,7 @@ export async function POST(request: Request) {
     }
 
     if (!rawWord) {
-      throw new Error(`OpenRouter models all failed: ${modelErrors.join(" | ")}`);
+      throw new Error(`AI providers all failed: ${providerErrors.join(" | ")}`);
     }
 
     const structuredWord = rawWord as VocabularyCard;
@@ -1072,7 +1016,7 @@ export async function POST(request: Request) {
 
     const responsePayload = {
       model: usedModel,
-      source: "openrouter",
+      source: usedProvider,
       stage: "study",
       word,
     };
@@ -1082,10 +1026,11 @@ export async function POST(request: Request) {
     return NextResponse.json(responsePayload);
   } catch (error) {
     const message = describeRequestError(error);
-    console.error("OpenRouter request failed", { query, error: message });
+    console.error("AI provider request failed", { query, error: message });
     const debug =
       error instanceof ModelParseError
         ? {
+            provider: error.provider,
             model: error.model,
             status: error.status,
             rawContent: error.rawContent,
