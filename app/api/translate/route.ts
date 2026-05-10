@@ -716,12 +716,19 @@ function describeRequestError(error: unknown) {
   return segments.join(" | ");
 }
 
-async function callOpenRouter(query: string, model: string, previousJson?: unknown, issues?: string[]) {
+async function callOpenRouter(
+  query: string,
+  model: string,
+  previousJson?: unknown,
+  issues?: string[],
+  options: { useJsonSchema?: boolean } = {},
+) {
+  const useJsonSchema = options.useJsonSchema ?? true;
   const userPrompt = previousJson && issues?.length
     ? buildRepairPrompt(query, previousJson, issues)
     : buildUserPrompt(query);
   const prompt = `${SYSTEM_PROMPT}\n\n${userPrompt}`;
-  console.info("OpenRouter request prompt", { query, model, prompt });
+  console.info("OpenRouter request prompt", { query, model, prompt, useJsonSchema });
 
   const response = await fetch(OPENROUTER_API_URL, {
     method: "POST",
@@ -743,14 +750,22 @@ async function callOpenRouter(query: string, model: string, previousJson?: unkno
           content: userPrompt,
         },
       ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "vocabulary_card",
-          strict: true,
-          schema: WORD_SCHEMA,
-        },
-      },
+      ...(useJsonSchema
+        ? {
+            response_format: {
+              type: "json_schema",
+              json_schema: {
+                name: "vocabulary_card",
+                strict: true,
+                schema: WORD_SCHEMA,
+              },
+            },
+          }
+        : {
+            response_format: {
+              type: "json_object",
+            },
+          }),
       temperature: 0.2,
     }),
   });
@@ -761,6 +776,7 @@ async function callOpenRouter(query: string, model: string, previousJson?: unkno
     model,
     status: response.status,
     rawBody,
+    useJsonSchema,
   });
   let payload: {
     error?: { message?: string };
@@ -782,6 +798,16 @@ async function callOpenRouter(query: string, model: string, previousJson?: unkno
   }
 
   if (!response.ok) {
+    if (useJsonSchema && response.status >= 500) {
+      console.warn("OpenRouter JSON schema request failed; retrying with plain JSON mode", {
+        query,
+        model,
+        status: response.status,
+        rawBody,
+      });
+      return callOpenRouter(query, model, previousJson, issues, { useJsonSchema: false });
+    }
+
     throw new Error(
       `${payload.error?.message ?? "OpenRouter request failed."} (status=${response.status}, model=${model})`,
     );
