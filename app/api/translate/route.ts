@@ -14,6 +14,7 @@ type ProviderConfig = {
   model: string;
 };
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const STUDY_CARD_CACHE_VERSION = "deepseek-v1";
 type WordCachePayload = { model: string; source: string; stage?: string; word: unknown };
 type WordCacheEntry = { expiresAt: number; payload: WordCachePayload };
 const wordCache = new Map<string, WordCacheEntry>();
@@ -435,13 +436,15 @@ async function loadWordCacheFromFile() {
 
 async function getCachedStudyCard(cacheKey: string) {
   const memoryHit = wordCache.get(cacheKey);
-  if (memoryHit && memoryHit.expiresAt > Date.now()) {
+  if (memoryHit && memoryHit.expiresAt > Date.now() && memoryHit.payload?.source === "deepseek") {
     return memoryHit.payload;
   }
 
   await loadWordCacheFromFile();
   const fileHit = wordCache.get(cacheKey);
-  return fileHit && fileHit.expiresAt > Date.now() ? fileHit.payload : null;
+  return fileHit && fileHit.expiresAt > Date.now() && fileHit.payload?.source === "deepseek"
+    ? fileHit.payload
+    : null;
 }
 
 async function setCachedStudyCard(cacheKey: string, payload: WordCachePayload) {
@@ -866,7 +869,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const cacheKey = normalizeQueryKey(query);
+    const cacheKey = `${STUDY_CARD_CACHE_VERSION}:${normalizeQueryKey(query)}`;
     const cached = await getCachedStudyCard(cacheKey);
     if (cached) {
       return NextResponse.json({
