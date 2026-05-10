@@ -721,14 +721,34 @@ async function callOpenRouter(
   model: string,
   previousJson?: unknown,
   issues?: string[],
-  options: { useJsonSchema?: boolean } = {},
+  options: { responseMode?: "schema" | "json_object" | "text" } = {},
 ) {
-  const useJsonSchema = options.useJsonSchema ?? true;
+  const responseMode = options.responseMode ?? "schema";
   const userPrompt = previousJson && issues?.length
     ? buildRepairPrompt(query, previousJson, issues)
     : buildUserPrompt(query);
   const prompt = `${SYSTEM_PROMPT}\n\n${userPrompt}`;
-  console.info("OpenRouter request prompt", { query, model, prompt, useJsonSchema });
+  console.info("OpenRouter request prompt", { query, model, prompt, responseMode });
+
+  const responseFormat =
+    responseMode === "schema"
+      ? {
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "vocabulary_card",
+              strict: true,
+              schema: WORD_SCHEMA,
+            },
+          },
+        }
+      : responseMode === "json_object"
+        ? {
+            response_format: {
+              type: "json_object",
+            },
+          }
+        : {};
 
   const response = await fetch(OPENROUTER_API_URL, {
     method: "POST",
@@ -750,22 +770,7 @@ async function callOpenRouter(
           content: userPrompt,
         },
       ],
-      ...(useJsonSchema
-        ? {
-            response_format: {
-              type: "json_schema",
-              json_schema: {
-                name: "vocabulary_card",
-                strict: true,
-                schema: WORD_SCHEMA,
-              },
-            },
-          }
-        : {
-            response_format: {
-              type: "json_object",
-            },
-          }),
+      ...responseFormat,
       temperature: 0.2,
     }),
   });
@@ -776,7 +781,7 @@ async function callOpenRouter(
     model,
     status: response.status,
     rawBody,
-    useJsonSchema,
+    responseMode,
   });
   let payload: {
     error?: { message?: string };
@@ -798,14 +803,24 @@ async function callOpenRouter(
   }
 
   if (!response.ok) {
-    if (useJsonSchema && response.status >= 500) {
+    if (responseMode === "schema" && response.status >= 500) {
       console.warn("OpenRouter JSON schema request failed; retrying with plain JSON mode", {
         query,
         model,
         status: response.status,
         rawBody,
       });
-      return callOpenRouter(query, model, previousJson, issues, { useJsonSchema: false });
+      return callOpenRouter(query, model, previousJson, issues, { responseMode: "json_object" });
+    }
+
+    if (responseMode === "json_object" && response.status >= 500) {
+      console.warn("OpenRouter JSON object request failed; retrying without response_format", {
+        query,
+        model,
+        status: response.status,
+        rawBody,
+      });
+      return callOpenRouter(query, model, previousJson, issues, { responseMode: "text" });
     }
 
     throw new Error(
