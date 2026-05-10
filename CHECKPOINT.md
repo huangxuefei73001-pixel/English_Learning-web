@@ -1,6 +1,6 @@
 # Word Islands Checkpoint
 
-Date: 2026-05-09
+Date: 2026-05-10
 
 ## Project Boundary
 
@@ -8,16 +8,18 @@ Date: 2026-05-09
 - Server project: `/home/ubuntu/English_Learning`
 - Do not touch: `/Users/pauline/Documents/Playground/ai-learning-platform-site`
 
-## Current Goal
+## Current Product State
 
-Upgrade Word Islands from a shared browser-local vocabulary tool into a multi-user site:
+Word Islands is now running as a multi-user English learning site:
 
-- Guests can search words and view study cards.
-- Login/register is required for favorites and review queue.
-- Each logged-in user sees only their own favorites.
-- Old browser-local export can be imported, but only by the admin account.
+- Guests can search words and view Study Cards
+- Login/register is required for favorites and review queue
+- Each logged-in user sees only their own favorites
+- Old browser-local export can be imported, but only by the admin account
+- Homepage uses a two-stage word lookup flow: `basic` first, then `study`
+- Study Card generation is now powered by DeepSeek official API
 
-## Work Completed Locally
+## Work Completed
 
 ### Account and Session API
 
@@ -69,6 +71,26 @@ Current behavior:
 - Review queue is loaded from the server account.
 - Admin-only import button appears only when `authUser.isAdmin` is true.
 
+### AI Provider and Study Card Flow
+
+Current provider:
+
+- DeepSeek official API
+- `DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions`
+- `DEEPSEEK_MODEL=deepseek-v4-flash`
+
+Current lookup behavior:
+
+- `mode: "basic"` returns a fast lightweight card
+- `mode: "study"` returns the full Study Card
+
+Study Card cache:
+
+- File: `.word-islands-cache/study-cards.json`
+- Cache key prefix: `deepseek-v1`
+
+The versioned cache prefix was added because old OpenRouter cache entries were being reused even after the provider switch.
+
 ### Export File
 
 The user downloaded:
@@ -89,14 +111,12 @@ The import flow currently reads `favorites` from this JSON.
 
 ## Required Environment Variables
 
-Existing OpenRouter variables still apply:
+Current AI variables:
 
 ```bash
-OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=openrouter/auto
-OPENROUTER_API_URL=https://openrouter.ai/api/v1/chat/completions
-OPENROUTER_HTTP_REFERER=https://wordislands.cn
-OPENROUTER_TITLE=Word Islands
+DEEPSEEK_API_KEY=...
+DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
+DEEPSEEK_MODEL=deepseek-v4-flash
 ```
 
 New admin variable:
@@ -123,42 +143,32 @@ npm run build
 git diff --check
 ```
 
-Build output included new dynamic routes:
+Build output included the auth/favorites routes and `/api/translate`.
 
-- `/api/auth/login`
-- `/api/auth/logout`
-- `/api/auth/me`
-- `/api/auth/register`
-- `/api/favorites`
-- `/api/favorites/[slug]`
-- `/api/favorites/import`
-
-Note: a local dev server smoke test was attempted on port `3020`, but the long-running dev process behaved inconsistently in this sandbox. Do not treat that as a product failure; the production build passed.
-
-On 2026-05-09, verification was re-run after docs/env updates:
-
-- `npm run typecheck` passed
 - `npm run build` passed
-- `git diff --check` passed
+- `npm run typecheck` passed
+
+Server-side verification also passed after the DeepSeek switch:
+
+```bash
+curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' -d '{"query":"obsolete","mode":"study"}'
+```
+
+and
+
+```bash
+curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' -d '{"query":"salient","mode":"study"}'
+```
+
+Both returned:
+
+- `source: "deepseek"`
+- `model: "deepseek-v4-flash"`
+- `stage: "study"`
 
 ## Current Git State Notes
 
-There were pre-existing dirty changes before this checkpoint. Do not revert them unless the user explicitly asks.
-
-Known modified/untracked areas:
-
-- `.gitignore`
-- `.env.example`
-- `README.md`
-- `DEPLOY_TENCENT.md`
-- `app/api/translate/route.ts`
-- `components/home-page.tsx`
-- `lib/search-history.ts`
-- `app/error.tsx`
-- `app/global-error.tsx`
-- `app/api/auth/`
-- `app/api/favorites/`
-- `lib/server/`
+As of this checkpoint, the repository was clean locally before this documentation sync.
 
 ## Next Session Steps
 
@@ -182,15 +192,25 @@ npm run typecheck
 npm run build
 ```
 
-4. Locally test the auth/favorites flow if needed.
+4. If the server behaves like it is still on an old provider, inspect:
 
-5. Set server env variable before deploy:
+```bash
+grep -n 'DEEPSEEK\\|OPENROUTER\\|XIAOMI' app/api/translate/route.ts
+```
+
+5. If a word still shows old provider data, clear the Study Card cache:
+
+```bash
+rm -rf .word-islands-cache
+```
+
+6. Set server env variable before deploy:
 
 ```bash
 WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
 ```
 
-6. Deploy to Tencent Cloud:
+7. Deploy to Tencent Cloud:
 
 ```bash
 npm run build
@@ -200,14 +220,16 @@ curl -I http://127.0.0.1:8083
 curl -I https://wordislands.cn
 ```
 
-7. Register/login using the admin email `huang_xuefei@yeah.net`.
+8. Register/login using the admin email `huang_xuefei@yeah.net`.
 
-8. Import `/Users/pauline/Downloads/word-islands-export.json` through the admin-only import button.
+9. Import `/Users/pauline/Downloads/word-islands-export.json` through the admin-only import button if needed.
 
 ## Important Product Decisions
 
 - Login/register is required for saving favorites.
 - Guests can search words without login.
 - Admin import is not a general user feature.
+- DeepSeek is the only active AI provider.
+- Old OpenRouter cache entries must not be trusted after provider changes.
 - Existing UI style should remain: Word Islands, learning island concept, rounded cards, warm minimal palette.
 - Do not redesign the site during this auth upgrade.

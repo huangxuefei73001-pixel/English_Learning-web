@@ -1,39 +1,81 @@
-# English_Learning
+# Word Islands
 
-一个移动优先的英语学习 Web App，基于 Next.js 14 + TypeScript + Tailwind CSS 搭建。现在首页已经接入真实模型接口，输入英文单词后会生成结构化的中英释义、近义词区别、常见搭配、例句和记忆方法。
+Word Islands 是一个面向真实用户的英语学习站，不是普通翻译页。首页先快速展示基础词卡，再异步生成完整 Study Card，让用户既能立刻看到释义，也能继续得到近义词区别、搭配、例句、记忆方法和写作提示。
 
-当前产品名是 Word Islands。游客可以直接查词；收藏单词、复习队列和旧收藏导入需要登录。每个登录账号只会看到自己的收藏记录。
+当前线上站点：
 
-## 已包含页面
+- [https://wordislands.cn](https://wordislands.cn)
 
-- 首页 Dashboard
-- Chat 对话页
-- Word Detail 词条详情页
-- Compare 易混词对比页
-- My Library 资料库页
-- Dictionary 词典入口页
+当前产品规则：
 
-## 视觉方向
+- 游客可以直接查词
+- 登录后才能收藏单词并进入复习队列
+- 每个账号只看到自己的收藏和复习记录
+- 旧收藏 JSON 导入只对 admin 账号开放
 
-- 主色：`#2F6B57`
-- 深色：`#1F4D3A`
-- 柔和绿：`#DDECE4`
-- 背景：`#F7FAF8`
-- 正文：`#1D2A24`
-
-## 技术栈
+## 当前架构
 
 - Next.js 14 App Router
 - TypeScript
 - Tailwind CSS
-- OpenRouter Chat Completions API
-- 默认模型：`openrouter/auto`
-- 服务端账号与收藏存储：`.data/word-islands.json`
+- DeepSeek 官方 Chat Completions API
+- 默认模型：`deepseek-v4-flash`
+- 账号与收藏存储：`.data/word-islands.json`
+- Study Card 缓存：`.word-islands-cache/study-cards.json`
 
-## 运行
+详细架构说明见：
 
-1. 安装依赖
-2. 启动开发服务
+- [docs/architecture.md](./docs/architecture.md)
+- [DEPLOY_TENCENT.md](./DEPLOY_TENCENT.md)
+- [DEPLOY_QUICK.md](./DEPLOY_QUICK.md)
+
+## 首页和 Study Card 行为
+
+查词分成两阶段：
+
+1. `basic`：快速返回基础卡片
+   - `word`
+   - `phonetics`
+   - `partOfSpeech`
+   - `chineseMeaning`
+   - `englishDefinition`
+   - `basic collocations`
+2. `study`：生成完整 Study Card
+   - 近义词区别
+   - 记忆方法
+   - 使用场景
+   - 真实例句
+   - 易错点
+   - 写作 / 汇报用法
+
+Study Card 结果会写入服务端缓存。当前缓存版本前缀是 `deepseek-v1`，这样旧的 OpenRouter 缓存不会再污染现在的结果。
+
+## 环境变量
+
+在项目根目录创建 `.env.local`：
+
+```bash
+DEEPSEEK_API_KEY=your_key_here
+DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
+DEEPSEEK_MODEL=deepseek-v4-flash
+WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
+```
+
+可选变量：
+
+```bash
+WORD_ISLANDS_DB_PATH=.data/word-islands.json
+```
+
+说明：
+
+- `DEEPSEEK_API_KEY` 必填
+- `DEEPSEEK_API_URL` 默认就是官方 `chat/completions`
+- `DEEPSEEK_MODEL` 当前固定使用 `deepseek-v4-flash`
+- `WORD_ISLANDS_ADMIN_EMAILS` 用英文逗号分隔多个 admin 邮箱
+- `WORD_ISLANDS_DB_PATH` 不填时默认写入项目根目录 `.data/word-islands.json`
+
+## 本地运行
 
 ```bash
 npm install
@@ -41,82 +83,73 @@ npm run build
 npm run dev
 ```
 
-## OpenRouter 配置
-
-在项目根目录创建 `.env.local`，至少配置：
+推荐的本地验证顺序：
 
 ```bash
-OPENROUTER_API_KEY=your_key_here
-OPENROUTER_MODEL=openrouter/auto
-OPENROUTER_API_URL=https://openrouter.ai/api/v1/chat/completions
+npm run build
+npm run typecheck
 ```
 
-如果你想给 OpenRouter 带上站点信息，也可以补上：
+## 主要路由
 
-```bash
-OPENROUTER_HTTP_REFERER=https://your-site.example
-OPENROUTER_TITLE=English_Learning
-```
+页面路由：
 
-代码会自动把 `OPENROUTER_BASE_URL` 或 `OPENAI_BASE_URL` 归一成 `/chat/completions` 端点。
+- `/` - 首页
+- `/chat` - AI 对话页
+- `/dictionary` - 词典入口
+- `/word/[slug]` - 词条详情
+- `/compare` - 易混词对比
+- `/library` - 资料库
 
-如果没有配置 API key，网站会回退到本地 demo 数据，但路由和页面结构保持一致。
+账号与收藏：
 
-如果你在腾讯云服务器上部署，优先把 key 放到服务器的 `.env.local` 或进程环境变量里，不要写进前端代码，也不要提交到仓库。`OPENROUTER_API_URL` 只有在服务器需要改成别的 OpenRouter-compatible 入口时才改。
+- `/api/auth/register` - 注册
+- `/api/auth/login` - 登录
+- `/api/auth/logout` - 退出登录
+- `/api/auth/me` - 当前登录用户
+- `/api/favorites` - 当前用户收藏列表与新增收藏
+- `/api/favorites/[slug]` - 删除当前用户收藏
+- `/api/favorites/import` - admin 导入旧收藏 JSON
 
-## 账号和收藏配置
+查词接口：
 
-收藏和复习队列保存在服务端 JSON 文件里，默认路径是：
-
-```bash
-.data/word-islands.json
-```
-
-`.data` 已加入 `.gitignore`，不要提交线上用户数据。
-
-如果需要指定创始人/admin 账号，用逗号分隔邮箱：
-
-```bash
-WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
-```
-
-只有 admin 邮箱登录后，页面才会显示“导入旧收藏 JSON”。普通用户没有导入入口，也不能调用导入接口。
-
-如果线上想把数据文件放到固定路径，可以配置：
-
-```bash
-WORD_ISLANDS_DB_PATH=/home/ubuntu/English_Learning/.data/word-islands.json
-```
+- `/api/translate`
+  - `mode: "basic"` 返回基础卡片
+  - `mode: "study"` 返回完整 Study Card
 
 ## 腾讯云部署
 
-详细的线上部署步骤放在 `DEPLOY_TENCENT.md`。
+腾讯云部署、systemd、Nginx、HTTPS 与排障流程见：
 
-仓库里同时准备了：
+- [DEPLOY_TENCENT.md](./DEPLOY_TENCENT.md)
+- [DEPLOY_QUICK.md](./DEPLOY_QUICK.md)
+
+仓库内已经准备好：
 
 - `systemd/English_Learning.service`
 - `nginx/English_Learning.conf`
 - `nginx/English_Learning-test.conf`
 
-如果你要最快上线，就照着 `DEPLOY_TENCENT.md` 逐步执行。
+## 数据文件
 
-## 路由
+服务端用户数据：
 
-- `/` - 首页
-- `/chat` - AI 对话
-- `/dictionary` - 词典入口
-- `/word/[slug]` - 词条详情
-- `/compare` - 易混词对比
-- `/library` - 我的资料库
-- `/api/auth/register` - 注册
-- `/api/auth/login` - 登录
-- `/api/auth/logout` - 退出登录
-- `/api/auth/me` - 当前登录用户
-- `/api/favorites` - 当前用户收藏列表与保存收藏
-- `/api/favorites/[slug]` - 删除当前用户收藏
-- `/api/favorites/import` - admin 导入旧收藏 JSON
+```bash
+.data/word-islands.json
+```
 
-## 说明
+Study Card 缓存：
 
-- 首页通过 `/api/translate` 调用 OpenRouter Chat Completions API；没有 API key 时会自动回退到本地 demo。
-- 现有的 `index.html`、`app.js`、`styles.css` 属于旧版静态原型，可以暂时保留，不影响新的 App Router 骨架。
+```bash
+.word-islands-cache/study-cards.json
+```
+
+这两个目录都不应提交线上真实数据。
+
+## 历史文件说明
+
+以下文件属于早期静态原型，可保留但不是当前线上主入口：
+
+- `index.html`
+- `app.js`
+- `styles.css`

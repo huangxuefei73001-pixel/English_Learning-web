@@ -6,9 +6,9 @@
 
 - 网站跑在腾讯云 CVM 上
 - 通过 Nginx 对外提供 `8083`（或后续再切到域名和 `80/443`）
-- OpenRouter Key 放在服务器环境里，不进前端代码
+- DeepSeek Key 放在服务器环境里，不进前端代码
 - 账号、收藏、复习队列数据保存在服务器 `.data/word-islands.json`
-- 如果服务器直连 OpenRouter 不通，可以切到代理或兼容接口
+- Study Card 缓存保存在服务器 `.word-islands-cache/study-cards.json`
 
 ## 1. 服务器准备
 
@@ -17,7 +17,7 @@
 - 系统：Ubuntu 22.04 / 24.04
 - 内存：2 GB 起步，4 GB 更稳
 - Node.js：18.18+，建议 20 LTS
-- 公网出站：能访问 `openrouter.ai:443`
+- 公网出站：能访问 `api.deepseek.com:443`
 
 先在腾讯云控制台确认：
 
@@ -64,38 +64,22 @@ cd English_Learning
 
 ```bash
 cat > .env.local <<'EOF'
-OPENROUTER_API_KEY=你的key
-OPENROUTER_MODEL=openrouter/auto
-OPENROUTER_API_URL=https://openrouter.ai/api/v1/chat/completions
-OPENROUTER_HTTP_REFERER=https://wordislands.cn
-OPENROUTER_TITLE=Word Islands
+DEEPSEEK_API_KEY=你的key
+DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
+DEEPSEEK_MODEL=deepseek-v4-flash
 WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
 EOF
 ```
 
 说明：
 
-- `OPENROUTER_API_KEY` 是真正的密钥
-- `OPENROUTER_MODEL` 推荐写 `openrouter/auto`，先让站点稳定可用
-- `OPENROUTER_API_URL` 默认就是 OpenRouter 官方地址的 `chat/completions` 端点
+- `DEEPSEEK_API_KEY` 是真正的密钥
+- `DEEPSEEK_API_URL` 默认就是 DeepSeek 官方 `chat/completions` 端点
+- `DEEPSEEK_MODEL` 当前固定使用 `deepseek-v4-flash`
 - `WORD_ISLANDS_ADMIN_EMAILS` 是允许导入旧收藏 JSON 的 admin 邮箱，多个邮箱用英文逗号隔开
 - 收藏和复习队列默认保存在项目根目录 `.data/word-islands.json`
-- 如果你想给 OpenRouter 带上站点信息，可以再加：
-
-```bash
-cat > .env.local <<'EOF'
-OPENROUTER_API_KEY=你的key
-OPENROUTER_MODEL=openrouter/auto
-OPENROUTER_API_URL=https://openrouter.ai/api/v1/chat/completions
-OPENROUTER_HTTP_REFERER=https://your-site.example
-OPENROUTER_TITLE=English_Learning
-WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
-EOF
-```
-
-如果你只提供 `OPENROUTER_BASE_URL` 或 `OPENAI_BASE_URL`，代码也会自动补成 `/chat/completions` 端点。
-
-如果你不想把 key 写到文件里，也可以直接在系统环境变量里导出，但 `.env.local` 最简单。
+- Study Card 缓存默认写入 `.word-islands-cache/study-cards.json`
+- 如果你不想把 key 写到文件里，也可以直接在系统环境变量里导出，但 `.env.local` 最简单
 
 如果你想固定账号数据文件位置，可以增加：
 
@@ -126,18 +110,17 @@ npm run start
 
 ```bash
 curl -I http://127.0.0.1:3000
-curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' -d '{"query":"salient"}'
+curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' -d '{"query":"salient","mode":"study"}'
 curl -s http://127.0.0.1:3000/api/auth/me
 ```
 
-如果 API 返回的是 `source: "openrouter"`，说明服务器已经成功读取到 key 并打通模型请求。
+如果 API 返回的是 `source: "deepseek"`，说明服务器已经成功读取到 key 并打通模型请求。
 
-如果返回 `source: "mock"`，说明：
+如果仍然返回旧的 `openrouter` 或 `openrouter-cache`，优先检查：
 
-- 你的 `OPENROUTER_API_KEY` 没有被读到
-- 或者 OpenAI 请求失败了
-- 或者服务器出网被拦了
-- 或者你填写了 `OPENROUTER_BASE_URL`，但使用的是旧代码
+- `app/api/translate/route.ts` 是否已经是 DeepSeek 版本
+- 服务是否已经重启到最新 build
+- `.word-islands-cache/` 是否残留旧 provider 缓存
 
 ## 6. 用 systemd 托管进程
 
@@ -216,7 +199,7 @@ sudo certbot --nginx -d learn.yourdomain.com
 https://learn.yourdomain.com
 ```
 
-## 9. OpenAI 连不上的排查
+## 9. DeepSeek 连不上的排查
 
 这是最容易卡住的地方，按这个顺序查。
 
@@ -228,8 +211,8 @@ cat .env.local
 
 至少要看到：
 
-- `OPENROUTER_API_KEY=...`
-- `OPENROUTER_MODEL=openrouter/auto`
+- `DEEPSEEK_API_KEY=...`
+- `DEEPSEEK_MODEL=deepseek-v4-flash`
 
 ### 9.2 确认服务已经重启
 
@@ -241,18 +224,33 @@ sudo journalctl -u English_Learning -n 50 --no-pager
 ### 9.3 确认服务器能出网
 
 ```bash
-curl -I https://openrouter.ai
+curl -I https://api.deepseek.com
 ```
 
 如果这里都不通，问题不是代码，是腾讯云服务器的出网网络或者代理。
 
-### 9.4 如果出网不通
+### 9.4 如果仍然返回旧 provider
 
-你有三种办法：
+先查代码和缓存：
 
-- 换一个能正常出网的腾讯云地域或机器
-- 配服务器侧代理
-- 把 `OPENROUTER_API_URL` 改成你自己的 OpenRouter-compatible 接口地址
+```bash
+grep -n 'DEEPSEEK\|OPENROUTER\|XIAOMI' app/api/translate/route.ts
+rm -rf .word-islands-cache
+npm run build
+sudo systemctl restart English_Learning
+```
+
+### 9.5 如果 DeepSeek 接口本身失败
+
+可以直接用服务器上的 key 裸测官方接口：
+
+```bash
+K=$(grep '^DEEPSEEK_API_KEY=' .env.local | cut -d= -f2-)
+curl -s https://api.deepseek.com/chat/completions \
+  -H "Authorization: Bearer $K" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: ok"}],"temperature":0}'
+```
 
 ## 10. 验证清单
 
@@ -269,8 +267,9 @@ curl -I https://openrouter.ai
 - 注册 / 登录后可以收藏单词
 - 登录后复习队列只显示当前账号收藏
 - admin 邮箱登录后可以看到旧收藏 JSON 导入入口
-- 如果有 key，接口返回 `source: "openrouter"`
-- 如果没有 key，至少能回退到 `source: "mock"`
+- 如果有 key，接口返回 `source: "deepseek"`
+- `mode: "basic"` 能先返回基础卡片
+- `mode: "study"` 能返回完整 Study Card
 
 如果：
 
