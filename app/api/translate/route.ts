@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveWordForQuery, type VocabularyWord } from "@/data/mock";
 
-const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL?.trim() || "https://api.deepseek.com/v1/chat/completions";
+const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL?.trim() || "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY?.trim() || "";
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash";
 const XIAOMI_API_URL = process.env.XIAOMI_API_URL?.trim() || "";
