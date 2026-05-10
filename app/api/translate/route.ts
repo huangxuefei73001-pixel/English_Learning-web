@@ -6,12 +6,9 @@ import { resolveWordForQuery, type VocabularyWord } from "@/data/mock";
 const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL?.trim() || "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY?.trim() || "";
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash";
-const XIAOMI_API_URL = process.env.XIAOMI_API_URL?.trim() || "";
-const XIAOMI_API_KEY = process.env.XIAOMI_API_KEY?.trim() || "";
-const XIAOMI_MODEL = process.env.XIAOMI_MODEL?.trim() || "";
 
 type ProviderConfig = {
-  id: "deepseek" | "xiaomi";
+  id: "deepseek";
   url: string;
   apiKey: string;
   model: string;
@@ -408,15 +405,6 @@ function resolveProviderSequence() {
       url: DEEPSEEK_API_URL,
       apiKey: DEEPSEEK_API_KEY,
       model: DEEPSEEK_MODEL,
-    });
-  }
-
-  if (XIAOMI_API_KEY && XIAOMI_API_URL && XIAOMI_MODEL) {
-    providers.push({
-      id: "xiaomi",
-      url: XIAOMI_API_URL,
-      apiKey: XIAOMI_API_KEY,
-      model: XIAOMI_MODEL,
     });
   }
 
@@ -967,15 +955,11 @@ export async function POST(request: Request) {
         providerErrors.push(`${provider.id}/${provider.model}: ${describeRequestError(error)}`);
 
         if (isRecoverableProviderError) {
-          console.warn("AI provider failed; trying next provider", {
+          console.warn("AI provider failed", {
             query,
             provider: provider.id,
             model: provider.model,
             error: describeRequestError(error),
-            remainingProviders: providers.slice(providers.indexOf(provider) + 1).map((item) => ({
-              provider: item.id,
-              model: item.model,
-            })),
           });
           continue;
         }
@@ -985,7 +969,7 @@ export async function POST(request: Request) {
     }
 
     if (!rawWord) {
-      throw new Error(`AI providers all failed: ${providerErrors.join(" | ")}`);
+      throw new Error(`DeepSeek request failed: ${providerErrors.join(" | ")}`);
     }
 
     const structuredWord = rawWord as VocabularyCard;
