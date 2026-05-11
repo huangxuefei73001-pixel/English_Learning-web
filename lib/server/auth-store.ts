@@ -263,6 +263,10 @@ export function importFavorites(userId: string, favorites: StoredFavorite[]) {
   return listFavorites(userId);
 }
 
+export function countRegisteredUsers() {
+  return readDb().users.length;
+}
+
 export function deleteFavorite(userId: string, slug: string) {
   const db = readDb();
   const before = db.favorites.length;

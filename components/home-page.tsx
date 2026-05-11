@@ -30,6 +30,12 @@ type AuthUser = {
   isAdmin: boolean;
 };
 
+type AdminStats = {
+  totalVisits: number;
+  uniqueVisitors: number;
+  registeredUsers: number;
+};
+
 type AuthMode = "login" | "register";
 
 const STORAGE_KEYS = {
@@ -53,6 +59,7 @@ const QUICK_START_WORDS = ["salient", "efficient", "contemplate"] as const;
 const INITIAL_FAVORITES: FavoriteEntry[] = [];
 
 const FALLBACK_WORD = getWordBySlug("salient") ?? getWordBySlug("contemplate") ?? getWordBySlug("effective")!;
+const statsNumberFormatter = new Intl.NumberFormat("zh-CN");
 
 function safeRead<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") {
@@ -303,6 +310,7 @@ export function HomePage() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [authMessage, setAuthMessage] = useState("登录后，收藏和复习队列只会属于你自己。");
+  const [adminStats, setAdminStats] = useState<AdminStats | null>(null);
   const [favoritesLoading, setFavoritesLoading] = useState(false);
   const normalizedFavorites = useMemo(
     () =>
@@ -360,6 +368,34 @@ export function HomePage() {
     }
   }
 
+  async function loadAdminStats() {
+    try {
+      const statsResponse = await fetch("/api/stats", { cache: "no-store" });
+
+      if (!statsResponse.ok) {
+        setAdminStats(null);
+        return;
+      }
+
+      const statsPayload = (await statsResponse.json()) as Partial<AdminStats>;
+      if (
+        typeof statsPayload.totalVisits === "number" &&
+        typeof statsPayload.uniqueVisitors === "number" &&
+        typeof statsPayload.registeredUsers === "number"
+      ) {
+        setAdminStats({
+          totalVisits: statsPayload.totalVisits,
+          uniqueVisitors: statsPayload.uniqueVisitors,
+          registeredUsers: statsPayload.registeredUsers,
+        });
+      } else {
+        setAdminStats(null);
+      }
+    } catch {
+      setAdminStats(null);
+    }
+  }
+
   async function loadCurrentUser() {
     const response = await fetch("/api/auth/me", { cache: "no-store" });
     const payload = (await response.json()) as { user?: AuthUser | null };
@@ -370,13 +406,26 @@ export function HomePage() {
     if (user) {
       setAuthEmail(user.email);
       await loadFavoritesForUser();
+      if (user.isAdmin) {
+        await loadAdminStats();
+      } else {
+        setAdminStats(null);
+      }
     } else {
       setFavorites([]);
+      setAdminStats(null);
     }
   }
 
   useEffect(() => {
     void loadCurrentUser();
+  }, []);
+
+  useEffect(() => {
+    void fetch("/api/stats/track", {
+      method: "POST",
+      cache: "no-store",
+    }).catch(() => undefined);
   }, []);
 
   function askForLogin(message = "登录后才能收藏单词和使用个人复习队列。") {
@@ -408,6 +457,11 @@ export function HomePage() {
       setAuthOpen(false);
       setAuthMessage("已登录。现在收藏和复习队列会保存到你的账号。");
       await loadFavoritesForUser();
+      if (payload.user.isAdmin) {
+        await loadAdminStats();
+      } else {
+        setAdminStats(null);
+      }
     } catch (caughtError) {
       setAuthMessage(caughtError instanceof Error ? caughtError.message : "账号操作失败，请稍后再试。");
     } finally {
@@ -418,6 +472,7 @@ export function HomePage() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthUser(null);
+    setAdminStats(null);
     setFavorites([]);
     setAuthPassword("");
     setAuthOpen(false);
@@ -1177,6 +1232,14 @@ export function HomePage() {
             ) : null}
           </div>
         </section>
+
+        {authUser?.isAdmin && adminStats ? (
+          <p className="px-2 pb-2 text-center text-xs leading-6 text-[#7a705f]">
+            总访问 {statsNumberFormatter.format(adminStats.totalVisits)} · 独立访客{" "}
+            {statsNumberFormatter.format(adminStats.uniqueVisitors)} · 注册用户{" "}
+            {statsNumberFormatter.format(adminStats.registeredUsers)}
+          </p>
+        ) : null}
       </section>
     </main>
   );

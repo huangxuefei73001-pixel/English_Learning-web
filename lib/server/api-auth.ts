@@ -21,6 +21,19 @@ export function requireUser() {
   return { user, response: null };
 }
 
+export function requireAdmin() {
+  const user = getCurrentUser();
+
+  if (!user?.isAdmin) {
+    return {
+      user: null,
+      response: NextResponse.json({ error: "无权限查看站点统计。" }, { status: 403 }),
+    };
+  }
+
+  return { user, response: null };
+}
+
 export function sessionCookieOptions(expires: Date) {
   return {
     httpOnly: true,
