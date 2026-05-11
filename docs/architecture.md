@@ -97,7 +97,42 @@ Rules:
 - review queue is account-scoped
 - only admin accounts can import legacy browser-local favorites JSON
 
-## 6. Frontend Responsibilities
+## 6. Admin Stats
+
+Site stats are stored separately from user data in:
+
+```text
+.data/word-islands-stats.json
+```
+
+This store tracks:
+
+- `totalVisits`
+- `uniqueVisitors`
+- `visitorIds`
+- `updatedAt`
+
+Routes:
+
+- `POST /api/stats/track`
+- `GET /api/stats`
+
+Behavior:
+
+- every homepage visit calls `POST /api/stats/track`
+- first-time visitors receive a long-lived `wordislands_visitor` cookie
+- `GET /api/stats` is admin-only and returns:
+  - `totalVisits`
+  - `uniqueVisitors`
+  - `registeredUsers`
+
+The homepage renders these numbers as a low-profile footer line only when:
+
+- the current session is logged in
+- `authUser.isAdmin === true`
+- `/api/stats` returns valid stats data
+
+## 7. Frontend Responsibilities
 
 The homepage is responsible for:
 
@@ -106,8 +141,11 @@ The homepage is responsible for:
 - showing “Study Card 正在生成中” during the second phase
 - rendering cached or freshly generated Study Cards
 - wiring favorites and review actions to authenticated APIs
+- calling `/api/stats/track` on load
+- fetching `/api/stats` for admin sessions
+- rendering the admin-only footer stats line
 
-## 7. Operational Risk Areas
+## 8. Operational Risk Areas
 
 The most common failure modes are:
 
@@ -119,8 +157,14 @@ The most common failure modes are:
    - local file changed, but the server is still running an older build
 4. accidental env overwrite
    - `.env.local` is replaced instead of safely updated
+5. partial deploy
+   - new routes are uploaded, but dependent files such as `api-auth.ts`, `auth-store.ts`, or `home-page.tsx` remain old
+6. stale homepage HTML / chunk mismatch
+   - `.next` contains new chunk names, but `curl http://127.0.0.1:3000` or the domain HTML still references old chunk files
+7. browser cache after deploy
+   - the server is healthy, but the browser keeps loading an old `/_next/static/...` asset set
 
-## 8. Validation Checklist
+## 9. Validation Checklist
 
 Healthy study response:
 
@@ -139,3 +183,6 @@ Minimum production check:
 3. `/api/translate` returns `source: deepseek`
 4. login still works
 5. favorites remain user-scoped
+6. `POST /api/stats/track` returns `{"ok":true}`
+7. admin browser session gets `200` from `/api/stats`
+8. homepage bottom text includes `总访问`

@@ -8,6 +8,7 @@
 - 通过 Nginx 对外提供 `8083`（或后续再切到域名和 `80/443`）
 - DeepSeek Key 放在服务器环境里，不进前端代码
 - 账号、收藏、复习队列数据保存在服务器 `.data/word-islands.json`
+- admin 统计数据保存在服务器 `.data/word-islands-stats.json`
 - Study Card 缓存保存在服务器 `.word-islands-cache/study-cards.json`
 
 ## 1. 服务器准备
@@ -78,6 +79,7 @@ EOF
 - `DEEPSEEK_MODEL` 当前固定使用 `deepseek-v4-flash`
 - `WORD_ISLANDS_ADMIN_EMAILS` 是允许导入旧收藏 JSON 的 admin 邮箱，多个邮箱用英文逗号隔开
 - 收藏和复习队列默认保存在项目根目录 `.data/word-islands.json`
+- admin 统计默认写入 `.data/word-islands-stats.json`
 - Study Card 缓存默认写入 `.word-islands-cache/study-cards.json`
 - 如果你不想把 key 写到文件里，也可以直接在系统环境变量里导出，但 `.env.local` 最简单
 
@@ -85,6 +87,12 @@ EOF
 
 ```bash
 WORD_ISLANDS_DB_PATH=/home/ubuntu/English_Learning/.data/word-islands.json
+```
+
+如果你想固定 stats 文件位置，也可以增加：
+
+```bash
+WORD_ISLANDS_STATS_PATH=/home/ubuntu/English_Learning/.data/word-islands-stats.json
 ```
 
 ## 4. 安装依赖并构建
@@ -112,9 +120,17 @@ npm run start
 curl -I http://127.0.0.1:3000
 curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' -d '{"query":"salient","mode":"study"}'
 curl -s http://127.0.0.1:3000/api/auth/me
+curl -s -X POST http://127.0.0.1:3000/api/stats/track
+curl -i -s http://127.0.0.1:3000/api/stats
 ```
 
 如果 API 返回的是 `source: "deepseek"`，说明服务器已经成功读取到 key 并打通模型请求。
+
+Stats 这两条的正确理解是：
+
+- `POST /api/stats/track` 返回 `{"ok":true}`
+- 未登录时 `GET /api/stats` 返回 `403` 是正常的
+- admin 登录后的浏览器请求 `/api/stats` 应返回 `200`
 
 如果仍然返回旧的 `openrouter` 或 `openrouter-cache`，优先检查：
 
@@ -240,7 +256,67 @@ npm run build
 sudo systemctl restart English_Learning
 ```
 
-### 9.5 如果 DeepSeek 接口本身失败
+### 9.5 如果首页白屏、统计不显示、或浏览器还在拿旧 chunk
+
+这是 2026-05-11 这次真实踩过的坑，按这个顺序查。
+
+先对账磁盘、服务、域名是不是同一版：
+
+```bash
+find .next/static/chunks/app -name 'page-*.js'
+find .next/static/css -type f
+curl -s http://127.0.0.1:3000 | grep -o '/_next/static/chunks/app/page-[^"]*js'
+curl -s http://127.0.0.1:3000 | grep -o '/_next/static/css/[^"]*css' | head -1
+curl -s https://wordislands.cn | grep -o '/_next/static/chunks/app/page-[^"]*js'
+curl -s https://wordislands.cn | grep -o '/_next/static/css/[^"]*css' | head -1
+```
+
+判断：
+
+- `.next` 和 `127.0.0.1:3000` 不一致：说明 running service 不是最新 build
+- `127.0.0.1:3000` 和域名不一致：说明域名入口或浏览器缓存还在吃旧首页 HTML
+
+如果服务没切到新 build：
+
+```bash
+sudo systemctl stop English_Learning
+sudo fuser -k 3000/tcp || true
+rm -rf .next
+npm run build
+sudo systemctl start English_Learning
+sleep 3
+```
+
+再核对：
+
+```bash
+cat .next/BUILD_ID
+curl -s http://127.0.0.1:3000 | grep -o '"buildId":"[^"]*"' | head -1
+```
+
+如果服务器端已经是新版本，但浏览器仍然白屏：
+
+- 先用无痕窗口打开站点
+- 访问 `https://wordislands.cn/?v=<当前BUILD_ID>`
+- 再登录并验收
+
+如果 admin 统计接口已经通了，但页面底部没有那一行，先确认浏览器控制台里：
+
+```js
+fetch('/api/auth/me').then(r => r.json()).then(x => x.user?.isAdmin)
+fetch('/api/stats').then(async r => ({ status: r.status, body: await r.text() })).then(console.log)
+document.body.innerText.includes('总访问')
+```
+
+只有在：
+
+- `isAdmin === true`
+- `/api/stats` 返回 `200`
+- 页面 DOM 里仍然没有 `总访问`
+
+时，才继续怀疑首页前端文件没同步到服务器。
+
+### 9.6 如果 DeepSeek 接口本身失败
 
 可以直接用服务器上的 key 裸测官方接口：
 
@@ -267,6 +343,10 @@ curl -s https://api.deepseek.com/chat/completions \
 - 注册 / 登录后可以收藏单词
 - 登录后复习队列只显示当前账号收藏
 - admin 邮箱登录后可以看到旧收藏 JSON 导入入口
+- admin 邮箱登录后，首页最底端会显示：
+  - 总访问
+  - 独立访客
+  - 注册用户
 - 如果有 key，接口返回 `source: "deepseek"`
 - `mode: "basic"` 能先返回基础卡片
 - `mode: "study"` 能返回完整 Study Card

@@ -43,6 +43,12 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
 ```
 
+如果你也启用了 admin 统计，推荐显式保留：
+
+```bash
+WORD_ISLANDS_STATS_PATH=.data/word-islands-stats.json
+```
+
 ## 4. 重建并重启
 
 ```bash
@@ -56,6 +62,8 @@ sleep 3
 
 ```bash
 curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' -d '{"query":"salient","mode":"study"}'
+curl -s -X POST http://127.0.0.1:3000/api/stats/track
+curl -i -s http://127.0.0.1:3000/api/stats
 ```
 
 成功时应看到：
@@ -63,6 +71,12 @@ curl -s http://127.0.0.1:3000/api/translate -H 'Content-Type: application/json' 
 ```json
 "source":"deepseek"
 ```
+
+额外说明：
+
+- `POST /api/stats/track` 应返回 `{"ok":true}`
+- 未登录时 `GET /api/stats` 返回 `403` 是正常的，不是故障
+- admin 登录后的浏览器会从 `/api/stats` 拿到 `200`
 
 ## 6. 如果结果像旧 provider
 
@@ -86,6 +100,34 @@ sudo systemctl restart English_Learning
 curl -I http://127.0.0.1:3000
 curl -I http://127.0.0.1:8083
 curl -I https://wordislands.cn
+```
+
+如果部署后浏览器出现：
+
+- `Loading chunk ... failed`
+- `Failed to load resource`
+- 页面仍然像旧版本
+
+先对账这三处，不要马上改业务代码：
+
+```bash
+find .next/static/chunks/app -name 'page-*.js'
+find .next/static/css -type f
+curl -s http://127.0.0.1:3000 | grep -o '/_next/static/chunks/app/page-[^"]*js'
+curl -s http://127.0.0.1:3000 | grep -o '/_next/static/css/[^"]*css' | head -1
+curl -s https://wordislands.cn | grep -o '/_next/static/chunks/app/page-[^"]*js'
+curl -s https://wordislands.cn | grep -o '/_next/static/css/[^"]*css' | head -1
+```
+
+判断方法：
+
+- `127.0.0.1:3000` 和 `.next` 不一致：服务没切到最新 build
+- `127.0.0.1:3000` 已是新版本，但域名还是旧资源：域名入口或浏览器缓存还没切过去
+
+如果服务器端已经是新资源，优先用无痕窗口访问：
+
+```text
+https://wordislands.cn/?v=<当前BUILD_ID>
 ```
 
 ## 8. 这份清单适用的前提

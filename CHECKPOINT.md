@@ -1,6 +1,6 @@
 # Word Islands Checkpoint
 
-Date: 2026-05-10
+Date: 2026-05-11
 
 ## Project Boundary
 
@@ -18,6 +18,7 @@ Word Islands is now running as a multi-user English learning site:
 - Old browser-local export can be imported, but only by the admin account
 - Homepage uses a two-stage word lookup flow: `basic` first, then `study`
 - Study Card generation is now powered by DeepSeek official API
+- Admin-only footer stats are available on the homepage bottom after login
 
 ## Work Completed
 
@@ -70,6 +71,33 @@ Current behavior:
 - Logged-in user can mark reviewed and remove from review queue.
 - Review queue is loaded from the server account.
 - Admin-only import button appears only when `authUser.isAdmin` is true.
+- Admin-only footer requests `/api/stats` and renders:
+  - total visits
+  - unique visitors
+  - registered users
+
+### Site Stats API
+
+Added routes:
+
+- `app/api/stats/route.ts`
+- `app/api/stats/track/route.ts`
+
+Added storage:
+
+- `lib/server/stats-store.ts`
+
+Updated dependencies:
+
+- `lib/server/api-auth.ts`
+- `lib/server/auth-store.ts`
+
+Current stats behavior:
+
+- every homepage visit posts to `/api/stats/track`
+- first-time visitors get the `wordislands_visitor` cookie
+- stats are stored in `.data/word-islands-stats.json`
+- `GET /api/stats` is admin-only
 
 ### AI Provider and Study Card Flow
 
@@ -131,6 +159,12 @@ Optional DB path:
 WORD_ISLANDS_DB_PATH=/home/ubuntu/English_Learning/.data/word-islands.json
 ```
 
+Optional stats path:
+
+```bash
+WORD_ISLANDS_STATS_PATH=/home/ubuntu/English_Learning/.data/word-islands-stats.json
+```
+
 If `WORD_ISLANDS_DB_PATH` is not set, the app uses `.data/word-islands.json` under the project root.
 
 ## Verification Already Run
@@ -165,6 +199,33 @@ Both returned:
 - `source: "deepseek"`
 - `model: "deepseek-v4-flash"`
 - `stage: "study"`
+
+Stats verification also passed after the server sync:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/api/stats/track
+curl -i -s http://127.0.0.1:3000/api/stats
+```
+
+Confirmed behavior:
+
+- track route returned `{"ok":true}`
+- stats route returned `403` without login
+- browser admin session returned `200` from `/api/stats`
+- browser console confirmed `isAdmin === true`
+
+Final browser-side issue was not API failure. It was a stale homepage asset / chunk mismatch after deploy. The running server and `.next` build eventually matched the new build:
+
+- current server build id: `dcgslcaMRrtmdd7E_xRX9`
+- current homepage chunk: `page-e32717b37a343857.js`
+- current homepage css: `a643504a586efba7.css`
+
+The successful recovery pattern was:
+
+1. verify server `.next` chunk names
+2. verify `curl http://127.0.0.1:3000` HTML chunk names
+3. compare against `curl https://wordislands.cn`
+4. clear old browser page assets by forcing a fresh page load
 
 ## Current Git State Notes
 
@@ -210,7 +271,18 @@ rm -rf .word-islands-cache
 WORD_ISLANDS_ADMIN_EMAILS=huang_xuefei@yeah.net
 ```
 
-7. Deploy to Tencent Cloud:
+7. If stats are part of the deploy, verify these files exist on the server:
+
+```bash
+app/api/stats/route.ts
+app/api/stats/track/route.ts
+lib/server/stats-store.ts
+lib/server/api-auth.ts
+lib/server/auth-store.ts
+components/home-page.tsx
+```
+
+8. Deploy to Tencent Cloud:
 
 ```bash
 npm run build
@@ -220,9 +292,18 @@ curl -I http://127.0.0.1:8083
 curl -I https://wordislands.cn
 ```
 
-8. Register/login using the admin email `huang_xuefei@yeah.net`.
+9. If homepage still serves old chunks after deploy, compare:
 
-9. Import `/Users/pauline/Downloads/word-islands-export.json` through the admin-only import button if needed.
+```bash
+find .next/static/chunks/app -name 'page-*.js'
+find .next/static/css -type f
+curl -s http://127.0.0.1:3000 | grep -o '/_next/static/chunks/app/page-[^"]*js'
+curl -s https://wordislands.cn | grep -o '/_next/static/chunks/app/page-[^"]*js'
+```
+
+10. Register/login using the admin email `huang_xuefei@yeah.net`.
+
+11. Import `/Users/pauline/Downloads/word-islands-export.json` through the admin-only import button if needed.
 
 ## Important Product Decisions
 
@@ -231,5 +312,6 @@ curl -I https://wordislands.cn
 - Admin import is not a general user feature.
 - DeepSeek is the only active AI provider.
 - Old OpenRouter cache entries must not be trusted after provider changes.
+- Admin stats are homepage-only and only render for admin sessions.
 - Existing UI style should remain: Word Islands, learning island concept, rounded cards, warm minimal palette.
 - Do not redesign the site during this auth upgrade.
